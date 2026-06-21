@@ -3,12 +3,13 @@
 // bet365 blocks login on any browser Playwright *launches* (automation fingerprint), even with
 // stealth flags. So we never launch Chromium: we attach over CDP to a genuine Edge/Chrome (just
 // started with a debug port). bet365 sees a normal browser — login works exactly like a tab you
-// opened yourself. You sign in, open a fixture's Bet Builder / Player Markets, and click the
-// floating gold "CAPTURE ODDS" button; only then does it read the whole painted grid in one pass
-// and write _b365_capture.json.
+// opened yourself. You sign in, open a fixture's Bet Builder, and click the floating gold "CAPTURE
+// ODDS" button; only then does it expand + scroll the grid to load every market and write
+// _b365_capture.json.
 //
-// SAFETY: the script clicks NOTHING on bet365 — it only reads the painted grid after YOU click the
-// injected button. It cannot place a bet, and it disconnects rather than closing your browser.
+// SAFETY: after YOU click the injected button, the script clicks only UI expanders ("Show more"
+// and collapsed market-group headers) to render the grid — NEVER a price, a participant, or the
+// betslip, so it cannot place a bet. It disconnects rather than closing your browser.
 import { chromium } from 'playwright';
 import { writeFileSync, rmSync, existsSync } from 'fs';
 import { fileURLToPath } from 'url';
@@ -110,34 +111,56 @@ if (!target) {
   process.exit(0);
 }
 
-// Read the WHOLE Bet Builder grid in one pass — every market group is already painted, so there
-// is no tab-clicking. Each gl-MarketGroup has a title (the market), a sticky player-name column
-// (.bbl-BetBuilderParticipantLabel_Name), and odds columns (.gl-Market) of .bbl-BetBuilderParticipant
-// cells, row-aligned to the names. Returns raw cells; Node maps them to catalog markets/lines.
-const raw = await target.evaluate(() => {
+// Read the WHOLE Bet Builder grid. bet365 collapses most market groups and caps each player list
+// to ~6 behind a "Show more", and lazy-renders rows as they scroll into view — so one snapshot
+// misses ~95% of it. We expand every group + every "Show more" (benign UI clicks — NEVER a price
+// or the betslip), then scroll the page and accumulate every odds cell across scroll positions.
+// Each gl-MarketGroup has a title (the market), a sticky player column (.bbl-…ParticipantLabel_Name),
+// and odds columns (.gl-Market of .bbl-BetBuilderParticipant cells) row-aligned to the names.
+const raw = await target.evaluate(async () => {
   const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
-  const groups = [...document.querySelectorAll('.gl-MarketGroup')].filter((g) => g.querySelector('.bbl-BetBuilderParticipant_Odds'));
-  const tops = groups.filter((g) => !groups.some((o) => o !== g && o.contains(g)));   // outermost only
-  const out = [];
-  for (const g of tops) {
-    const title = norm(g.querySelector('[class*=MarketGroupButton],[class*=GroupHeader],[class*=Subtitle]')?.textContent)
-      .replace(/Sub On Play On.*$/i, '').replace(/Bet Boost.*$/i, '').trim();
-    const names = [...g.querySelectorAll('.bbl-BetBuilderParticipantLabel_Name')].map((e) => norm(e.textContent));
-    if (!names.length) continue;
-    const cols = [...g.querySelectorAll('.gl-Market')].filter((m) => m.querySelector('.bbl-BetBuilderParticipant_Odds'));
-    cols.forEach((m, colIndex) => {
-      const hdrEl = m.querySelector('[class*=Header]') || m.querySelector('[class*=columnheader]');
-      const colHeader = norm(hdrEl?.textContent);
-      [...m.querySelectorAll('.bbl-BetBuilderParticipant')].forEach((c, ri) => {
-        out.push({
-          group: title, colHeader, colIndex, player: names[ri],
-          odds: norm(c.querySelector('.bbl-BetBuilderParticipant_Odds')?.textContent),
-          suspended: c.className.includes('Suspended') || !!c.querySelector('[class*=Suspended]'),
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const showMore = () => {
+    for (const el of document.querySelectorAll('*'))
+      if (el.children.length <= 1 && /^show more$/i.test(norm(el.textContent))) { try { el.click(); } catch {} }
+  };
+  showMore(); await sleep(500);
+  for (const g of document.querySelectorAll('.gl-MarketGroupPod')) {            // expand collapsed groups
+    if (g.querySelector('.bbl-BetBuilderParticipant_Odds')) continue;
+    const btn = g.querySelector('[class*=MarketGroupButton],[class*=GroupHeader],[class*=CenteredLabel]');
+    if (btn) { try { btn.click(); } catch {} await sleep(120); }
+  }
+  await sleep(400); showMore(); await sleep(500);
+
+  const acc = new Map();   // keyed so re-reads across scroll positions de-dup
+  const read = () => {
+    const groups = [...document.querySelectorAll('.gl-MarketGroup')].filter((g) => g.querySelector('.bbl-BetBuilderParticipant_Odds'));
+    const tops = groups.filter((g) => !groups.some((o) => o !== g && o.contains(g)));
+    for (const g of tops) {
+      const title = norm(g.querySelector('[class*=MarketGroupButton],[class*=GroupHeader],[class*=Subtitle]')?.textContent)
+        .replace(/Sub On Play On.*$/i, '').replace(/Bet Boost.*$/i, '').trim();
+      const names = [...g.querySelectorAll('.bbl-BetBuilderParticipantLabel_Name')].map((e) => norm(e.textContent));
+      if (!names.length) continue;
+      const cols = [...g.querySelectorAll('.gl-Market')].filter((m) => m.querySelector('.bbl-BetBuilderParticipant_Odds'));
+      cols.forEach((m, colIndex) => {
+        const hdrEl = m.querySelector('[class*=Header]') || m.querySelector('[class*=columnheader]');
+        const colHeader = norm(hdrEl?.textContent);
+        [...m.querySelectorAll('.bbl-BetBuilderParticipant')].forEach((c, ri) => {
+          const player = names[ri];
+          const odds = norm(c.querySelector('.bbl-BetBuilderParticipant_Odds')?.textContent);
+          if (!player || !odds) return;
+          acc.set(`${title}|${colHeader}|${colIndex}|${player}`, {
+            group: title, colHeader, colIndex, player, odds,
+            suspended: c.className.includes('Suspended') || !!c.querySelector('[class*=Suspended]'),
+          });
         });
       });
-    });
-  }
-  return out;
+    }
+  };
+  const se = document.scrollingElement;
+  for (let y = 0; y <= se.scrollHeight + 600; y += 600) { se.scrollTop = y; await sleep(150); read(); }
+  se.scrollTop = 0;
+  return [...acc.values()];
 });
 
 const isOdds = (t) => /^(\d+\/\d+|\d+\.\d+|EVS|evens)$/i.test(t);
@@ -147,6 +170,7 @@ const isOdds = (t) => /^(\d+\/\d+|\d+\.\d+|EVS|evens)$/i.test(t);
 function toLeg(r) {
   if (!r.odds || !isOdds(r.odds) || r.suspended) return null;
   const g = r.group.toLowerCase(), h = r.colHeader.toLowerCase();
+  if (/headed|outside box|inside box|in the box|1st half|first half|2nd half|second half/.test(g)) return null; // variants not in our catalog
   if (/score or assist/.test(g)) {
     if (h.startsWith('score') && !h.includes('assist')) return { marketKey: 'goals', line: null };
     if (h === 'assist') return { marketKey: 'assists', line: null };

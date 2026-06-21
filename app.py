@@ -406,7 +406,7 @@ class App:
         if not self._last and not self.tabs:
             return self._status("run Find value (or scan a player) first, then Capture", err=True)
         self._status("opening Edge on bet365 — sign in there (real browser, login works), open the "
-                     "fixture's Player Markets, then click the gold CAPTURE ODDS button…")
+                     "fixture's Bet Builder, then click the gold CAPTURE ODDS button…")
 
         def work():
             with open(os.path.join(HERE, "_b365_capture.log"), "w", encoding="utf-8") as lf:
