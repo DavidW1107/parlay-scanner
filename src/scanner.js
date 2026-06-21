@@ -140,11 +140,16 @@ const slimLeg = (l) => ({
   player: l.player, playerId: l.playerId, team: l.team, market: l.market, line: l.line, kind: l.kind,
   p: l.p, sample: l.sample, l10: l.l10, odds: l.odds, edge: l.edge,
 });
-const slimParlay = (p) => ({
-  size: p.legs.length, prob: p.prob, odds: p.odds, fairOdds: p.fairOdds, ev: p.ev,
-  ret10: p.odds ? +(10 * p.odds).toFixed(2) : null,
-  legs: p.legs.map(slimLeg),
-});
+const PAYOUT_CAP = 1000; // bet365 Bet Builder caps payout at 1000/1 — display odds/returns reflect it
+const slimParlay = (p) => {
+  const shownOdds = p.odds == null ? null : Math.min(p.odds, PAYOUT_CAP);
+  return {
+    size: p.legs.length, prob: p.prob, odds: p.odds, shownOdds, capped: p.odds != null && p.odds > PAYOUT_CAP,
+    fairOdds: p.fairOdds, ev: p.ev,
+    ret10: shownOdds ? +(10 * shownOdds).toFixed(2) : null, // reflects the 1000/1 cap
+    legs: p.legs.map(slimLeg),
+  };
+};
 
 // Greedily keep the shown parlays distinct: cap how often any player-market is reused across the
 // set (by player+market, not the exact line — else "Llorente Tackles o2.5/o3.5" count as different
@@ -173,14 +178,15 @@ export function recommend(data, oddsRows, captureFixture) {
   const { parlays, poolSize } = buildParlays(legs, { haveOdds });
 
   const byProb = [...parlays].sort((a, b) => b.prob - a.prob);
-  // The headline is SINGLES (topLegs) — exact odds, real edge, no payout cap. Parlays stay small:
-  // bet365 caps Bet Builder payout at 1000/1 so big multis are pointless, and same-match correlation
-  // makes their EV unreliable. No longshots tier — it was a variance trap the cap makes uncashable.
+  // Headline is SINGLES (topLegs) — exact odds, real edge, no cap. Then: small +EV combos (value),
+  // a likely small accumulator (bankers), and bigger multis (parlays) for when you want them — all
+  // with payout shown CAPPED at 1000/1, since that's the most bet365 pays on a Bet Builder.
   const tiers = {
     value: haveOdds
       ? diversify(parlays.filter((p) => p.ev > 0 && p.legs.length === 2 && p.prob >= 0.1).sort((a, b) => b.ev - a.ev), 8).map(slimParlay)
       : [],
-    bankers: diversify(byProb.filter((p) => p.legs.length <= 3 && (!p.odds || p.odds <= 1000)), 6).map(slimParlay),
+    bankers: diversify(byProb.filter((p) => p.legs.length <= 3), 6).map(slimParlay),
+    parlays: diversify(parlays.filter((p) => p.legs.length >= 3).sort((a, b) => (b.odds || b.fairOdds) - (a.odds || a.fairOdds)), 6).map(slimParlay),
   };
   const topLegs = legs
     .filter((l) => l.sample >= 6 && (!haveOdds || l.odds > 1))
