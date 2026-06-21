@@ -175,10 +175,10 @@ class App:
         self.nb.add(rf, text="★ Recommendations")
 
         ttk.Label(root, foreground="#666", padding=(12, 0, 0, 6), wraplength=1140,
-                  text="Find value ranks every starter × market by a conservative (Wilson) probability; Capture bet365 "
-                       "merges real odds → edge. Double-click any leg for the stats behind it. Single-leg odds are exact; "
-                       "parlay returns (~) multiply legs as if independent — bet365's Bet Builder quotes LESS (same-match "
-                       "correlation), so treat them as estimates. Bet responsibly.").pack(fill="x")
+                  text="The edge is in SINGLES (top list) — exact bet365 odds, real statistical edge, no payout cap. "
+                       "Double-click any leg for the stats behind it. Parlays are a small step up only: bet365 caps Bet "
+                       "Builder payout at 1000/1, and same-match correlation makes the real price lower than the (~) "
+                       "estimate shown. Bet responsibly.").pack(fill="x")
 
         threading.Thread(target=self._boot, daemon=True).start()
 
@@ -383,6 +383,9 @@ class App:
             "heuristic": ("⚠ ESTIMATED from recent starters — no lineup released, players may not start", "neg"),
         }.get(status, (f"lineup: {status}", "hdr"))
         t.insert("", "end", text=badge[0], tags=(badge[1],))
+        warn = rec["meta"].get("oddsWarning")
+        if warn:
+            t.insert("", "end", text=f"⚠ ODDS MISMATCH — {warn}", tags=("neg",))
 
         h = t.insert("", "end", text="TOP SINGLE LEGS  ·  by " + ("edge" if od else "confidence"), tags=("hdr",))
         for l in rec["topLegs"]:
@@ -391,10 +394,10 @@ class App:
                            values=self._leg_vals(l, od), tags=(tag,))
             self._reco_leg[iid] = (l.get("playerId"), l["player"])
 
-        order = [("BANKERS  ·  most likely to land", "bankers")]
+        order = []
         if od:
-            order.append(("VALUE  ·  best expected value", "value"))
-        order.append(("LONGSHOTS  ·  biggest return", "longshots"))
+            order.append(("VALUE  ·  small +EV combos (bet365 caps payout at 1000/1)", "value"))
+        order.append(("ACCUMULATOR  ·  most likely small combo", "bankers"))
         for title, key in order:
             tiers = rec["tiers"].get(key, [])
             hh = t.insert("", "end", text=f"{title}   ({len(tiers)})", tags=("hdr",))

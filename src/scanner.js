@@ -163,21 +163,24 @@ function diversify(parlays, n, maxReuse = 2) {
 }
 
 // Top-level: legs (+optional odds) -> ranked legs + tiered parlays, all slimmed for JSON.
-export function recommend(data, oddsRows) {
-  const haveOdds = !!(oddsRows && oddsRows.length);
-  const legs = haveOdds ? withOdds(data.legs, oddsRows) : data.legs.map((l) => ({ ...l }));
+export function recommend(data, oddsRows, captureFixture) {
+  const rawHaveOdds = !!(oddsRows && oddsRows.length);
+  const legs = rawHaveOdds ? withOdds(data.legs, oddsRows) : data.legs.map((l) => ({ ...l }));
+  const matched = legs.filter((l) => l.odds > 1).length;
+  // Captured odds only "count" if they actually matched players in THIS fixture. A capture for a
+  // different match merges nothing → fall back to confidence ranking and warn, don't show blanks.
+  const haveOdds = rawHaveOdds && matched > 0;
   const { parlays, poolSize } = buildParlays(legs, { haveOdds });
 
   const byProb = [...parlays].sort((a, b) => b.prob - a.prob);
+  // The headline is SINGLES (topLegs) — exact odds, real edge, no payout cap. Parlays stay small:
+  // bet365 caps Bet Builder payout at 1000/1 so big multis are pointless, and same-match correlation
+  // makes their EV unreliable. No longshots tier — it was a variance trap the cap makes uncashable.
   const tiers = {
-    bankers: diversify(byProb.filter((p) => p.legs.length <= 3), 6).map(slimParlay),
-    // Value = SMALL (2-leg) +EV parlays with a realistic chance. Ranking by raw EV over all sizes
-    // is degenerate — EV compounds multiplicatively, so it always picks 5-leg longshots that never
-    // land (P≈0). The clean value is in the single legs above; this is the honest step up from them.
     value: haveOdds
       ? diversify(parlays.filter((p) => p.ev > 0 && p.legs.length === 2 && p.prob >= 0.1).sort((a, b) => b.ev - a.ev), 8).map(slimParlay)
       : [],
-    longshots: diversify(parlays.filter((p) => p.legs.length >= 4).sort((a, b) => (b.odds || b.fairOdds) - (a.odds || a.fairOdds)), 6).map(slimParlay),
+    bankers: diversify(byProb.filter((p) => p.legs.length <= 3 && (!p.odds || p.odds <= 1000)), 6).map(slimParlay),
   };
   const topLegs = legs
     .filter((l) => l.sample >= 6 && (!haveOdds || l.odds > 1))
@@ -190,10 +193,11 @@ export function recommend(data, oddsRows) {
     topLegs, tiers,
     meta: {
       legsScored: data.legs.length, parlayPool: poolSize, parlaysBuilt: parlays.length,
-      note: 'Single-leg odds are exact (captured from bet365). PARLAY odds/returns multiply legs as ' +
-            'if independent — bet365 Bet Builder prices same-match legs WITH correlation, so its real ' +
-            'quote is lower (often much). Probabilities are conservative (Wilson-LB) on a small sample. ' +
-            'A ranking tool, not a guarantee — verify the price on bet365 and bet responsibly.',
+      oddsWarning: rawHaveOdds && !matched ? `captured odds were for ${captureFixture || 'another fixture'} — capture THIS match's Bet Builder` : null,
+      note: 'The edge is in SINGLES — exact bet365 odds, real statistical edge, no payout cap. bet365 ' +
+            'caps Bet Builder payout at 1000/1, so big multis are pointless; and same-match legs are ' +
+            'correlated, so a multi\'s real price + EV are LOWER than the independent product shown — keep ' +
+            'them small. Conservative (Wilson-LB) probabilities on a small sample. Verify on bet365; bet responsibly.',
     },
   };
 }
