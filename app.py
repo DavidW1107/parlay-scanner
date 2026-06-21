@@ -175,9 +175,9 @@ class App:
         self.nb.add(rf, text="★ Recommendations")
 
         ttk.Label(root, foreground="#666", padding=(12, 0, 0, 6), wraplength=1140,
-                  text="The edge is in SINGLES (top list) — exact bet365 odds, real statistical edge. Double-click any "
-                       "leg for the stats behind it. Parlays are below: odds/returns shown CAPPED at 1000/1 (bet365's Bet "
-                       "Builder max), and same-match correlation makes the real price lower than the (~) estimate. "
+                  text="SINGLES (top list) are the edge — exact bet365 odds, place on bet365; double-click any leg for the "
+                       "stats. PARLAYS over 1000/1 (→BF) exceed bet365's cap — place on BETFAIR (25-leg, uncapped). Parlay odds "
+                       "are estimated from bet365 single prices; Betfair's are usually close but verify before staking. "
                        "Bet responsibly.").pack(fill="x")
 
         threading.Thread(target=self._boot, daemon=True).start()
@@ -398,14 +398,14 @@ class App:
         if od:
             order.append(("VALUE  ·  small +EV combos", "value"))
         order.append(("ACCUMULATOR  ·  most likely small combo", "bankers"))
-        order.append(("PARLAYS  ·  bigger multis (payout capped at 1000/1)", "parlays"))
+        order.append(("PARLAYS  ·  big multis — place on BETFAIR (no 1000/1 cap)", "parlays"))
         for title, key in order:
             tiers = rec["tiers"].get(key, [])
             hh = t.insert("", "end", text=f"{title}   ({len(tiers)})", tags=("hdr",))
             for p in tiers:
-                so = p.get("shownOdds")
-                if so:
-                    odds = (f"{so:.2f}" if so < 100 else f"{so:.0f}") + (" cap" if p.get("capped") else "")
+                o = p.get("odds")
+                if o:
+                    odds = (f"{o:.2f}" if o < 100 else f"{o:.0f}") + (" →BF" if p.get("betfair") else "")
                 else:
                     odds = f"{p['fairOdds']:.1f} fair"
                 ret = f"~€{p['ret10']:.0f}" if p.get("ret10") else "—"   # ~ = independent estimate; bet365 quotes less

@@ -140,16 +140,13 @@ const slimLeg = (l) => ({
   player: l.player, playerId: l.playerId, team: l.team, market: l.market, line: l.line, kind: l.kind,
   p: l.p, sample: l.sample, l10: l.l10, odds: l.odds, edge: l.edge,
 });
-const PAYOUT_CAP = 1000; // bet365 Bet Builder caps payout at 1000/1 — display odds/returns reflect it
-const slimParlay = (p) => {
-  const shownOdds = p.odds == null ? null : Math.min(p.odds, PAYOUT_CAP);
-  return {
-    size: p.legs.length, prob: p.prob, odds: p.odds, shownOdds, capped: p.odds != null && p.odds > PAYOUT_CAP,
-    fairOdds: p.fairOdds, ev: p.ev,
-    ret10: shownOdds ? +(10 * shownOdds).toFixed(2) : null, // reflects the 1000/1 cap
-    legs: p.legs.map(slimLeg),
-  };
-};
+const PAYOUT_CAP = 1000; // bet365 Bet Builder max; over this → place on Betfair (25-leg, uncapped)
+const slimParlay = (p) => ({
+  size: p.legs.length, prob: p.prob, odds: p.odds, fairOdds: p.fairOdds, ev: p.ev,
+  ret10: p.odds ? +(10 * p.odds).toFixed(2) : null,        // uncapped — Betfair pays it
+  betfair: p.odds != null && p.odds > PAYOUT_CAP,          // exceeds bet365's 1000/1 → place on Betfair
+  legs: p.legs.map(slimLeg),
+});
 
 // Greedily keep the shown parlays distinct: cap how often any player-market is reused across the
 // set (by player+market, not the exact line — else "Llorente Tackles o2.5/o3.5" count as different
@@ -186,11 +183,10 @@ export function recommend(data, oddsRows) {
       ? diversify(parlays.filter((p) => p.ev > 0 && p.legs.length === 2 && p.prob >= 0.1).sort((a, b) => b.ev - a.ev), 8).map(slimParlay)
       : [],
     bankers: diversify(byProb.filter((p) => p.legs.length <= 3), 6).map(slimParlay),
-    // Payout caps at 1000/1, so the best capped multi REACHES the cap with the highest win-prob —
-    // not the one with the most legs (those just lower P for the same capped payout). Rank by capped
-    // odds, then prob.
-    parlays: diversify(parlays.filter((p) => p.legs.length >= 3)
-      .sort((a, b) => Math.min(b.odds || b.fairOdds, PAYOUT_CAP) - Math.min(a.odds || a.fairOdds, PAYOUT_CAP) || b.prob - a.prob), 6).map(slimParlay),
+    // Big multis for Betfair (no 1000/1 cap) — ranked by return (uncapped). Ones over 1000/1 are
+    // flagged → Betfair; smaller ones can go on bet365. prob floor drops numerically-absurd lottery.
+    parlays: diversify(parlays.filter((p) => p.legs.length >= 3 && p.prob >= 0.003)
+      .sort((a, b) => (b.odds || b.fairOdds) - (a.odds || a.fairOdds)), 6).map(slimParlay),
   };
   const topLegs = legs
     .filter((l) => l.sample >= 6 && (!haveOdds || l.odds > 1))
@@ -206,10 +202,11 @@ export function recommend(data, oddsRows) {
       oddsWarning: rawHaveOdds && !matched
         ? `captured odds are for other players (${[...new Set(oddsRows.map((r) => r.player))].slice(0, 3).join(', ')}…) — capture THIS match's Bet Builder`
         : null,
-      note: 'The edge is in SINGLES — exact bet365 odds, real statistical edge, no payout cap. bet365 ' +
-            'caps Bet Builder payout at 1000/1, so big multis are pointless; and same-match legs are ' +
-            'correlated, so a multi\'s real price + EV are LOWER than the independent product shown — keep ' +
-            'them small. Conservative (Wilson-LB) probabilities on a small sample. Verify on bet365; bet responsibly.',
+      note: 'SINGLES (top list) are the edge — exact bet365 odds, place on bet365. PARLAYS over 1000/1 ' +
+            'exceed bet365\'s Bet Builder cap → place on BETFAIR (25-leg, uncapped). Caveat: parlay odds are ' +
+            'estimated from bet365 SINGLE prices (independent product) — Betfair\'s single prices are usually ' +
+            'close (strong edges survive, thin ones may not) but its correlated combined price differs, so ' +
+            'VERIFY on Betfair before staking. Conservative (Wilson-LB) probabilities, small sample. Bet responsibly.',
     },
   };
 }
