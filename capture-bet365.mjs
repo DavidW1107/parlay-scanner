@@ -170,6 +170,22 @@ const isOdds = (t) => /^(\d+\/\d+|\d+\.\d+|EVS|evens)$/i.test(t);
 function toLeg(r) {
   if (!r.odds || !isOdds(r.odds) || r.suspended) return null;
   const g = r.group.toLowerCase(), h = r.colHeader.toLowerCase();
+  const row = (r.player || '').toLowerCase();
+  // --- TEAM markets: `selection` carries the bet (team name / 'Both teams score' / 'Over X') ---
+  if (/\bresult\b/.test(g) && !/both teams|range|winning|half/.test(g)) {       // full-match 1X2; skip Draw column
+    return row === 'match' && h !== 'draw' ? { marketKey: 'result', line: null, selection: r.colHeader } : null;
+  }
+  if (/both teams to score/.test(g) && !/card|receive/.test(g)) {
+    return row === 'match' && h === 'yes' ? { marketKey: 'btts', line: null, selection: 'Both teams score' } : null;
+  }
+  if (/double chance/.test(g)) {
+    const m = r.player.match(/^(.+?)\s+or\s+draw$|^draw\s+or\s+(.+)$/i);          // "France or Draw" → France
+    return m ? { marketKey: 'dc', line: null, selection: (m[1] || m[2]).trim() } : null;
+  }
+  if (/^total goals/.test(g) && !/range/.test(g)) {                             // Over col, row "N Goals" → over (N+0.5)
+    const m = h === 'over' && r.player.match(/(\d+)\s*goals?/i);
+    return m ? { marketKey: 'ou_goals', line: +m[1] + 0.5, selection: `Over ${+m[1] + 0.5}` } : null;
+  }
   if (/inside box|in the box|1st half|first half|2nd half|second half/.test(g)) return null; // variants we don't stat
   if (/score or assist/.test(g)) {
     if (h.startsWith('score') && !h.includes('assist')) return { marketKey: 'goals', line: null };
@@ -194,10 +210,11 @@ const byMarket = {};
 for (const r of raw) {
   const leg = toLeg(r);
   if (!leg) continue;
-  const k = `${r.player}|${leg.marketKey}|${leg.line}`;
+  const player = leg.selection ?? r.player;   // team legs carry the selection; player legs the player name
+  const k = `${player}|${leg.marketKey}|${leg.line}`;
   if (seen.has(k)) continue; // same market priced in two groups (e.g. Score == Anytime)
   seen.add(k);
-  rows.push({ player: r.player, marketKey: leg.marketKey, line: leg.line, odds: r.odds, rawMarket: `${r.group} / ${r.colHeader}` });
+  rows.push({ player, marketKey: leg.marketKey, line: leg.line, odds: r.odds, rawMarket: `${r.group} / ${r.colHeader}` });
   byMarket[leg.marketKey] = (byMarket[leg.marketKey] || 0) + 1;
 }
 

@@ -22,6 +22,11 @@ function nameMatch(a, b) {
   if (ta.length >= 2 && tb.length >= 2 && ta[0][0] !== tb[0][0]) return false;             // first initials differ
   return true;
 }
+const tnorm = (s) => (s || '').toLowerCase().normalize('NFKD').replace(/[^a-z ]/g, '').replace(/\b(fc|afc|cf|sc|ac)\b/g, '').replace(/\s+/g, ' ').trim();
+function teamNameMatch(a, b) { // bet365 team name vs FotMob team name (national teams exact; clubs loose)
+  const x = tnorm(a), y = tnorm(b);
+  return !!x && !!y && (x === y || x.includes(y) || y.includes(x));
+}
 
 // memo so a follow-up "with odds" call reuses the (expensive) FotMob scan instead of re-fetching.
 const memo = new Map();
@@ -44,7 +49,7 @@ async function pool(items, n, fn) {
 // side"); upgrade to a proper opponent-rated model if it needs to be sharper.
 const AVG_GOALS = 1.3; // ~typical goals per team per game, the baseline a factor of 1.0 maps to
 const ATTACK = new Set(['goals', 'assists', 'shots', 'sot', 'chances']);
-const DEFENSE = new Set(['tackles', 'fouls', 'fouled']);
+const DEFENSE = new Set(['tackles', 'fouls', 'fouled', 'saves']); // up vs a strong attack (more to do / more shots faced)
 const avgOf = (form, k) => (form.length ? form.reduce((s, f) => s + f[k], 0) / form.length : null);
 function oppFactor(marketKey, opp) {
   if (!opp || opp.ga == null) return 1;
@@ -181,9 +186,17 @@ function teamLegs(homeName, homeForm, awayName, awayForm, homeOpp, awayOpp) {
 function withOdds(legs, oddsRows) {
   return legs.map((leg) => {
     const o = { ...leg };
-    const hit = (oddsRows || []).find((r) =>
-      r.marketKey === leg.marketKey && nameMatch(r.player, leg.player) &&
-      (leg.kind === 'atleast' ? r.line == null : r.line != null && Math.abs(r.line - leg.line) < 0.01));
+    const lineEq = (r) => r.line != null && Math.abs(r.line - leg.line) < 0.01;
+    const hit = (oddsRows || []).find((r) => {
+      if (r.marketKey !== leg.marketKey) return false;
+      if (leg.isTeam) {                                        // team markets match by selection, not player name
+        if (leg.marketKey === 'ou_goals') return lineEq(r);
+        if (leg.marketKey === 'btts') return true;
+        if (leg.marketKey === 'result' || leg.marketKey === 'dc') return teamNameMatch(r.player, leg.team);
+        return false;                                          // team_goals — bet365 has no clean match here
+      }
+      return nameMatch(r.player, leg.player) && (leg.kind === 'atleast' ? r.line == null : lineEq(r));
+    });
     const dec = hit && toDecimal(hit.odds);
     if (dec) { o.odds = dec; o.implied = impliedProb(dec); o.edge = o.p - o.implied; }
     return o;
@@ -200,7 +213,7 @@ function* kCombos(n, k, start = 0, prefix = []) {
 // present — the highest-edge legs (for Value); these two sets barely overlap, since +edge legs are
 // usually higher-odds / lower-prob. Without both, one tier or the other comes up empty.
 function buildParlays(legs, { poolSize = 16, maxSize = 6, haveOdds = false } = {}) {
-  const strong = legs.filter((l) => l.sample >= 6);
+  const strong = legs.filter((l) => l.sample >= 6 && !l.naive); // naive (Result/DC): form can't price a matchup
   const byProb = strong.filter((l) => l.p >= 0.55).sort((a, b) => b.p - a.p).slice(0, 10);
   const byEdge = haveOdds ? strong.filter((l) => l.odds > 1 && l.edge > 0).sort((a, b) => b.edge - a.edge).slice(0, 10) : [];
   const seen = new Set();
@@ -274,7 +287,7 @@ export function recommend(data, oddsRows) {
     likely: diversify(byProb.filter((p) => p.legs.length >= 2 && p.legs.length <= 3), 6).map(slimParlay),
   };
   const topLegs = legs
-    .filter((l) => l.sample >= 6 && (!haveOdds || l.odds > 1))
+    .filter((l) => l.sample >= 6 && !l.naive && (!haveOdds || l.odds > 1)) // exclude Result/DC (opponent-naive)
     .sort((a, b) => (haveOdds ? (b.edge ?? -9) - (a.edge ?? -9) : b.p - a.p))
     .slice(0, 25).map(slimLeg);
 
