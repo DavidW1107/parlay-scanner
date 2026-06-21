@@ -80,6 +80,27 @@ export async function deepDive(playerId, lastN = 10) {
   return { id: playerId, player: name, sample: records.length, markets };
 }
 
+// Focused stats for ONE recommended leg: hit-rate windows for that exact market/line, the per-90
+// average for the stat, and the game-by-game log. Backs the double-click drill-down.
+export async function legStat(playerId, marketKey, line, lastN = 18) {
+  const m = MARKETS[marketKey];
+  if (!m) throw new Error('unknown market: ' + marketKey);
+  const { name, records } = await playerRecords(playerId, lastN);
+  const stat = m.stat;
+  const ln = line === '' || line == null ? 0 : Number(line);
+  const ml = marketLine(records, m, ln);
+  // per-90: total stat over total minutes (only games actually played)
+  let sv = 0, sm = 0;
+  for (const r of records) { const min = r.minutes ?? 0; if (min > 0) { sv += r[stat] ?? 0; sm += min; } }
+  const per90 = sm > 0 ? +((sv / sm) * 90).toFixed(2) : null;
+  const hit = m.kind === 'ou' ? (v) => v > ln : (v) => v >= (m.n ?? 1);
+  const log = records.slice(0, 12).map((r) => ({
+    date: (r.date || '').slice(0, 10), opp: r.opponent, isHome: r.isHome,
+    value: r[stat] ?? 0, minutes: r.minutes ?? 0, hit: hit(r[stat] ?? 0),
+  }));
+  return { player: name, market: m.label, line: ln, kind: m.kind, per90, sample: ml.sample, windows: ml.hitRate, log };
+}
+
 // --- demo: real Haaland data vs sample odds — run `node src/scan.js` ---
 if (process.argv[1] === (await import('url')).fileURLToPath(import.meta.url)) {
   const odds = [

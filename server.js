@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { resolveFixture, getTeam, likelyXI, listFixtures, close } from './src/fotmob.js';
-import { deepDive } from './src/scan.js';
+import { deepDive, legStat } from './src/scan.js';
 import { legsForFixture, recommend } from './src/scanner.js';
 
 const WEB = fileURLToPath(new URL('./web/', import.meta.url));
@@ -33,6 +33,13 @@ const server = createServer(async (req, res) => {
       const id = Number(q.get('id'));
       if (!id) return json(res, 400, { error: 'id required' });
       return json(res, 200, await deepDive(id, Number(q.get('lastN')) || 10));
+    }
+
+    // Focused stats for one leg (hit-rate windows + per-90 + game log) — the drill-down.
+    if (url.pathname === '/api/legstat') {
+      const id = Number(q.get('id'));
+      if (!id) return json(res, 400, { error: 'id required' });
+      return json(res, 200, await legStat(id, q.get('market'), q.get('line') ?? '', Number(q.get('lastN')) || 18));
     }
 
     // Upcoming fixtures for a date (YYYY-MM-DD) — the picker.

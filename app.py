@@ -392,7 +392,7 @@ class App:
             tag = "pos" if od and (l.get("edge") or 0) > 0 else ""
             iid = t.insert(h, "end", text="   " + self._leg_label(l) + f"   (n{l['sample']})",
                            values=self._leg_vals(l, od), tags=(tag,))
-            self._reco_leg[iid] = (l.get("playerId"), l["player"])
+            self._reco_leg[iid] = l
 
         order = []
         if od:
@@ -416,17 +416,51 @@ class App:
                                values=(f"{round(p['prob'] * 100)}%", odds, ret, ev), tags=(tag,))
                 for l in p["legs"]:
                     iid = t.insert(par, "end", text="        " + self._leg_label(l), values=self._leg_vals(l, od))
-                    self._reco_leg[iid] = (l.get("playerId"), l["player"])
+                    self._reco_leg[iid] = l
 
         m = rec["meta"]
         tail = "odds merged ✓" if od else "Capture bet365 to add odds + returns"
         self._status(f"{rec['fixture']} — {m['legsScored']} legs scored, {m['parlaysBuilt']} parlays  ·  {tail}")
 
     def _reco_click(self, ev):
-        # double-click a leg → open that player's full hit-rate grid (the stats behind the pick)
-        info = self._reco_leg.get(self.reco.identify_row(ev.y))
-        if info and info[0]:
-            self.load_player(info[0], info[1])
+        # double-click a leg → focused stats for THAT market (hit-rate + per-90 + game log)
+        l = self._reco_leg.get(self.reco.identify_row(ev.y))
+        if not l:
+            return
+        if not l.get("playerId"):
+            return self._status(f"{l['player']} — {l['market']}: team market (per-game view lands with team odds)")
+        line = l.get("line")
+        url = (f"/api/legstat?id={l['playerId']}&market={urllib.parse.quote(l.get('marketKey') or '')}"
+               f"&line={'' if line is None else line}&lastN={self.e_n.get().strip() or '18'}")
+        self._status(f"loading {l['player']} — {l['market']} stats…")
+        self._async(lambda: api(url), self._show_legstat)
+
+    def _show_legstat(self, d):
+        if "error" in d:
+            return self._status(d["error"], err=True)
+        line_txt = "" if d["kind"] == "atleast" else f" o{d['line']}"
+        top = tk.Toplevel(self.root)
+        top.title(f"{d['player']} — {d['market']}{line_txt}")
+        top.geometry("440x460")
+        w = d["windows"]
+        pctw = lambda x: "—" if not x or x.get("rate") is None else f"{round(x['rate'] * 100)}% ({x['hits']}/{x['n']})"
+        head = (f"{d['player']}  ·  {d['market']}{line_txt}\n\n"
+                f"Hit rate (cleared the line):\n"
+                f"   L10   {pctw(w['last10'])}\n   L5    {pctw(w['last5'])}\n   Season {pctw(w['season'])}\n"
+                f"   Home  {pctw(w['home'])}\n   Away  {pctw(w['away'])}\n\n"
+                f"Per-90 average:  {d['per90'] if d['per90'] is not None else '—'}")
+        ttk.Label(top, text=head, justify="left", padding=(14, 12)).pack(anchor="w")
+        ttk.Label(top, text="Recent games", foreground=GOLD, padding=(14, 0, 0, 2)).pack(anchor="w")
+        tv = ttk.Treeview(top, columns=("opp", "val", "min", "hit"), show="headings", height=12)
+        for c, h, wd in (("opp", "Opponent", 175), ("val", "Value", 55), ("min", "Min", 50), ("hit", "Hit", 45)):
+            tv.heading(c, text=h)
+            tv.column(c, width=wd, anchor="w" if c == "opp" else "center")
+        tv.tag_configure("y", foreground=GREEN)
+        tv.tag_configure("n", foreground=RED)
+        for g in d["log"]:
+            tv.insert("", "end", tags=("y" if g["hit"] else "n",),
+                      values=(("(H) " if g.get("isHome") else "(A) ") + (g["opp"] or ""), g["value"], g["minutes"], "✓" if g["hit"] else "·"))
+        tv.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
     # ----- player deep dive -----
     def load_player(self, pid, name):
