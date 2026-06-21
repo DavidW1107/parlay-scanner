@@ -212,10 +212,10 @@ function* kCombos(n, k, start = 0, prefix = []) {
 // noise). The pool is the UNION of the highest-probability legs (for Bankers) and — when odds are
 // present — the highest-edge legs (for Value); these two sets barely overlap, since +edge legs are
 // usually higher-odds / lower-prob. Without both, one tier or the other comes up empty.
-function buildParlays(legs, { poolSize = 16, maxSize = 6, haveOdds = false } = {}) {
+function buildParlays(legs, { poolSize = 20, maxSize = 6, haveOdds = false } = {}) {
   const strong = legs.filter((l) => l.sample >= 6 && !l.naive); // naive (Result/DC): form can't price a matchup
-  const byProb = strong.filter((l) => l.p >= 0.55).sort((a, b) => b.p - a.p).slice(0, 10);
-  const byEdge = haveOdds ? strong.filter((l) => l.odds > 1 && l.edge > 0).sort((a, b) => b.edge - a.edge).slice(0, 10) : [];
+  const byProb = strong.filter((l) => l.p >= 0.55).sort((a, b) => b.p - a.p).slice(0, 14);
+  const byEdge = haveOdds ? strong.filter((l) => l.odds > 1 && l.edge > 0).sort((a, b) => b.edge - a.edge).slice(0, 14) : [];
   const seen = new Set();
   const pool = [];
   for (const l of [...byProb, ...byEdge]) { if (seen.has(l.id)) continue; seen.add(l.id); pool.push(l); if (pool.length >= poolSize) break; }
@@ -280,11 +280,11 @@ export function recommend(data, oddsRows) {
   // win-prob small combos as a placeholder until you capture.
   const tiers = haveOdds ? {
     value: diversify(parlays.filter((p) => p.ev > 0 && p.legs.length >= 2 && p.legs.length <= 4 && p.prob >= 0.08)
-      .sort((a, b) => b.ev - a.ev), 8).map(slimParlay),
+      .sort((a, b) => b.ev - a.ev), 14, 3).map(slimParlay),
     bigReturn: diversify(parlays.filter((p) => p.legs.length >= 3 && p.legs.length <= 4 && p.prob >= 0.02)
-      .sort((a, b) => (Math.min(b.odds || 0, PAYOUT_CAP) - Math.min(a.odds || 0, PAYOUT_CAP)) || b.prob - a.prob), 6).map(slimParlay),
+      .sort((a, b) => (Math.min(b.odds || 0, PAYOUT_CAP) - Math.min(a.odds || 0, PAYOUT_CAP)) || b.prob - a.prob), 12, 3).map(slimParlay),
   } : {
-    likely: diversify(byProb.filter((p) => p.legs.length >= 2 && p.legs.length <= 3), 6).map(slimParlay),
+    likely: diversify(byProb.filter((p) => p.legs.length >= 2 && p.legs.length <= 3), 10).map(slimParlay),
   };
   const topLegs = legs
     .filter((l) => l.sample >= 6 && !l.naive && (!haveOdds || l.odds > 1)) // exclude Result/DC (opponent-naive)

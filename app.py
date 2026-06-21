@@ -18,7 +18,12 @@ from tkinter import ttk
 BASE = "http://localhost:5757"
 HERE = os.path.dirname(os.path.abspath(__file__))
 NODE = shutil.which("node") or "node"
-GREEN, RED, GOLD = "#1b8a4b", "#c0392b", "#9a7a22"
+# house palette — warm obsidian dark, eggshell ink, rationed gold (matches mtmn.ie / M.social DNA)
+OBSIDIAN, PANEL, PANEL2, LINE = "#0a0908", "#14110f", "#1d1813", "#2c2419"
+INK, MUT = "#ece6d8", "#8d8676"
+GREEN, RED, GOLD = "#5cb878", "#d2624f", "#c9a24b"
+MONO = ("Cascadia Mono", "Consolas", "monospace")
+SANS = ("Segoe UI", "system-ui", "sans-serif")
 
 
 # ---------- pure logic (mirrors src/engine.js + web/app.js) ----------
@@ -121,8 +126,15 @@ class App:
         root.title("Parlay Scanner")
         root.geometry("1180x760")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self._apply_theme()
 
-        bar = ttk.Frame(root, padding=(10, 8))
+        hdr = ttk.Frame(root, padding=(16, 14, 16, 8))
+        hdr.pack(fill="x")
+        ttk.Label(hdr, text="PARLAY SCANNER", font=(self.sans, 17, "bold")).pack(side="left")
+        ttk.Label(hdr, text="STATS × ODDS  ·  VALUE FINDER", font=(self.mono, 9), foreground=GOLD).pack(side="left", padx=(12, 0))
+        ttk.Separator(root).pack(fill="x", padx=12)
+
+        bar = ttk.Frame(root, padding=(12, 10))
         bar.pack(fill="x")
         self.e_home = self._entry(bar, "Home team", "Man City", 18)
         self.e_away = self._entry(bar, "Away team", "Arsenal", 18)
@@ -132,7 +144,7 @@ class App:
         self.e_n.pack(side="left")
         self.btn_fx = ttk.Button(bar, text="📅 Fixtures", command=self.open_fixtures, state="disabled")
         self.btn_fx.pack(side="left", padx=(0, 8))
-        self.btn_val = ttk.Button(bar, text="★ Find value", command=self.find_value, state="disabled")
+        self.btn_val = ttk.Button(bar, text="★ Find value", command=self.find_value, state="disabled", style="Gold.TButton")
         self.btn_val.pack(side="left")
         self.btn = ttk.Button(bar, text="Scan squads", command=self.scan, state="disabled")
         self.btn.pack(side="left", padx=8)
@@ -174,12 +186,46 @@ class App:
         self.reco.bind("<Double-Button-1>", self._reco_click)  # leg -> backing stats
         self.nb.add(rf, text="★ Recommendations")
 
-        ttk.Label(root, foreground="#666", padding=(12, 0, 0, 6), wraplength=1140,
+        ttk.Label(root, foreground=MUT, padding=(14, 2, 14, 8), wraplength=1140, font=(self.sans, 9),
                   text="SINGLES (top list) are the edge — exact bet365 odds + return. Double-click any leg for the stats. "
                        "VALUE = best +EV 2–4 leg combos; BIG RETURN = 3–4 legs for a bigger payout (capped at bet365's 1000/1). "
                        "Parlay returns are estimates — same-match correlation makes bet365's real price lower. Bet responsibly.").pack(fill="x")
 
         threading.Thread(target=self._boot, daemon=True).start()
+
+    def _apply_theme(self):
+        from tkinter import font as tkfont
+        fams = set(tkfont.families())
+        self.mono = next((f for f in MONO if f in fams), "Consolas")
+        self.sans = next((f for f in SANS if f in fams), "Segoe UI")
+        self.root.configure(bg=OBSIDIAN)
+        s = ttk.Style()
+        try:
+            s.theme_use("clam")
+        except tk.TclError:
+            pass
+        s.configure(".", background=OBSIDIAN, foreground=INK, fieldbackground=PANEL, bordercolor=LINE,
+                    lightcolor=LINE, darkcolor=LINE, troughcolor=PANEL, font=(self.sans, 10))
+        s.configure("TFrame", background=OBSIDIAN)
+        s.configure("TLabel", background=OBSIDIAN, foreground=INK)
+        s.configure("TLabelframe", background=OBSIDIAN, bordercolor=LINE)
+        s.configure("TLabelframe.Label", background=OBSIDIAN, foreground=GOLD, font=(self.mono, 9))
+        s.configure("TSeparator", background=LINE)
+        s.configure("TEntry", fieldbackground=PANEL, foreground=INK, insertcolor=INK, bordercolor=LINE, padding=5)
+        s.configure("TButton", background=PANEL2, foreground=INK, bordercolor=LINE, focuscolor=OBSIDIAN, padding=(13, 7))
+        s.map("TButton", background=[("active", LINE), ("pressed", LINE)], foreground=[("disabled", MUT)])
+        s.configure("Gold.TButton", background=GOLD, foreground="#1a1408", font=(self.sans, 10, "bold"))
+        s.map("Gold.TButton", background=[("active", "#dab35a"), ("pressed", "#b8923f")], foreground=[("disabled", "#5a4d2e")])
+        s.configure("Treeview", background=PANEL, fieldbackground=PANEL, foreground=INK, bordercolor=LINE,
+                    rowheight=25, font=(self.mono, 10))
+        s.configure("Treeview.Heading", background=PANEL2, foreground=MUT, relief="flat", font=(self.mono, 8))
+        s.map("Treeview", background=[("selected", LINE)], foreground=[("selected", GOLD)])
+        s.map("Treeview.Heading", background=[("active", LINE)])
+        s.configure("TNotebook", background=OBSIDIAN, bordercolor=LINE, tabmargins=(2, 5, 2, 0))
+        s.configure("TNotebook.Tab", background=PANEL, foreground=MUT, bordercolor=LINE, padding=(16, 7))
+        s.map("TNotebook.Tab", background=[("selected", PANEL2)], foreground=[("selected", GOLD)])
+        s.configure("Vertical.TScrollbar", background=PANEL2, troughcolor=OBSIDIAN, bordercolor=OBSIDIAN, arrowcolor=MUT)
+        s.configure("TPanedwindow", background=OBSIDIAN)
 
     def _entry(self, parent, label, default, width):
         ttk.Label(parent, text=label).pack(side="left", padx=(0, 2))
@@ -191,7 +237,8 @@ class App:
     def _squad(self, parent, title):
         lf = ttk.Labelframe(parent, text=title, padding=4)
         lf.pack(fill="both", expand=True, pady=(0, 6))
-        lb = tk.Listbox(lf, activestyle="none", borderwidth=0, highlightthickness=0)
+        lb = tk.Listbox(lf, activestyle="none", borderwidth=0, highlightthickness=0,
+                        bg=PANEL, fg=INK, selectbackground=LINE, selectforeground=GOLD, font=(self.sans, 10))
         sb = ttk.Scrollbar(lf, command=lb.yview)
         lb.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
@@ -326,6 +373,7 @@ class App:
         top = tk.Toplevel(self.root)
         top.title("Upcoming fixtures — double-click to scan")
         top.geometry("580x540")
+        top.configure(bg=OBSIDIAN)
         tv = ttk.Treeview(top, columns=("league",), show="tree headings")
         tv.heading("#0", text="Fixture")
         tv.column("#0", width=380, anchor="w")
@@ -447,6 +495,7 @@ class App:
         top = tk.Toplevel(self.root)
         top.title(f"{d['player']} — {d['market']}{line_txt}")
         top.geometry("440x460")
+        top.configure(bg=OBSIDIAN)
         w = d["windows"]
         pctw = lambda x: "—" if not x or x.get("rate") is None else f"{round(x['rate'] * 100)}% ({x['hits']}/{x['n']})"
         head = (f"{d['player']}  ·  {d['market']}{line_txt}\n\n"
