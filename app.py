@@ -291,6 +291,8 @@ class App:
                 url += f"&homeId={m['homeId']}"
             if m.get("awayId"):
                 url += f"&awayId={m['awayId']}"
+            if m.get("utc"):
+                url += f"&utc={urllib.parse.quote(m['utc'])}"
         if use_odds:
             url += "&useOdds=1"
         if fresh:
@@ -348,7 +350,7 @@ class App:
             if not f:
                 return
             self._match = {"matchId": f["matchId"], "home": f["home"], "away": f["away"],
-                           "homeId": f.get("homeId"), "awayId": f.get("awayId")}
+                           "homeId": f.get("homeId"), "awayId": f.get("awayId"), "utc": f.get("utc")}
             for entry, val in ((self.e_home, f["home"]), (self.e_away, f["away"])):
                 entry.delete(0, "end")
                 entry.insert(0, val)
@@ -383,6 +385,9 @@ class App:
             "heuristic": ("⚠ ESTIMATED from recent starters — no lineup released, players may not start", "neg"),
         }.get(status, (f"lineup: {status}", "hdr"))
         t.insert("", "end", text=badge[0], tags=(badge[1],))
+        rot = rec.get("rotationNote")
+        if rot:
+            t.insert("", "end", text="⚠ " + rot, tags=("neg",))
         warn = rec["meta"].get("oddsWarning")
         if warn:
             t.insert("", "end", text=f"⚠ ODDS MISMATCH — {warn}", tags=("neg",))

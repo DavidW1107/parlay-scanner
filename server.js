@@ -54,7 +54,7 @@ const server = createServer(async (req, res) => {
       let data;
       try {
         data = await legsForFixture(
-          { matchId: num('matchId'), home: q.get('home') || '', away: q.get('away') || '', homeId: num('homeId'), awayId: num('awayId'), fresh: !!q.get('fresh') },
+          { matchId: num('matchId'), home: q.get('home') || '', away: q.get('away') || '', homeId: num('homeId'), awayId: num('awayId'), utc: q.get('utc') || null, fresh: !!q.get('fresh') },
           Number(q.get('lastN')) || 18);
       } catch (e) { return json(res, 404, { error: String(e?.message || e) }); }
       let oddsRows = null;

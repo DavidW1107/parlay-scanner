@@ -163,7 +163,7 @@ const findKey = (o, key, d = 0) => {
 };
 
 export function getTeam(teamId) {
-  return cached(`team4-${teamId}`, 12 * 3600e3, async () => {
+  return cached(`team5-${teamId}`, 12 * 3600e3, async () => {
     const pp = await pageProps(`https://www.fotmob.com/teams/${teamId}/x`);
     const sq = findKey(pp, 'squad');
     const groups = Array.isArray(sq) ? sq : sq?.squad || [];
@@ -186,7 +186,8 @@ export function getTeam(teamId) {
         const gf = home ? f.home.score : f.away.score, ga = home ? f.away.score : f.home.score;
         return { gf, ga, total: f.home.score + f.away.score, btts: f.home.score > 0 && f.away.score > 0, win: gf > ga, draw: gf === ga, isHome: home };
       });
-    return { id: teamId, players, finished, form };
+    const dates = all.filter((f) => f?.status?.utcTime).map((f) => f.status.utcTime); // for congestion checks
+    return { id: teamId, players, finished, form, dates };
   });
 }
 

@@ -85,10 +85,12 @@ export async function legsForFixture(spec, lastN = 18) {
   const roster = [...homeXI.map((p) => ({ ...p, team: homeName })), ...awayXI.map((p) => ({ ...p, team: awayName }))];
 
   // team form first — drives both the team markets AND the per-player opponent adjustment
-  let homeForm = [], awayForm = [];
+  let homeForm = [], awayForm = [], homeDates = [], awayDates = [];
   if (hId && aId) {
-    try { const [ht, at] = await Promise.all([getTeam(hId), getTeam(aId)]); homeForm = ht.form || []; awayForm = at.form || []; }
-    catch { /* form unavailable → no adjustment */ }
+    try {
+      const [ht, at] = await Promise.all([getTeam(hId), getTeam(aId)]);
+      homeForm = ht.form || []; awayForm = at.form || []; homeDates = ht.dates || []; awayDates = at.dates || [];
+    } catch { /* form unavailable → no adjustment */ }
   }
   const homeOpp = { ga: avgOf(awayForm, 'ga'), gf: avgOf(awayForm, 'gf') }; // home XI faces the away team
   const awayOpp = { ga: avgOf(homeForm, 'ga'), gf: avgOf(homeForm, 'gf') };
@@ -123,7 +125,23 @@ export async function legsForFixture(spec, lastN = 18) {
   // team-level legs (result, total goals, BTTS, team goals) — opponent-adjusted where it applies
   legs.push(...teamLegs(homeName, homeForm, awayName, awayForm, homeOpp, awayOpp));
 
-  const out = { fixture: `${homeName} v ${awayName}`, home: homeName, away: awayName, lineupStatus, legs };
+  // rotation context — only when the XI is OUR guess (heuristic). FotMob's predicted/confirmed XI
+  // already encodes the tactical call (rest before a midweek game, rotate vs a weak side, etc.).
+  let rotationNote = null;
+  if (lineupStatus === 'heuristic') {
+    const flags = [];
+    const mUtc = spec.utc ? new Date(spec.utc).getTime() : NaN;
+    const congested = (dates) => Number.isFinite(mUtc) && (dates || []).some((d) => {
+      const dd = Math.abs(new Date(d).getTime() - mUtc); return dd > 36e5 && dd < 4 * 864e5; // another game within 4 days (not this one)
+    });
+    if (congested(homeDates)) flags.push(`${homeName} play again within 4 days`);
+    if (congested(awayDates)) flags.push(`${awayName} play again within 4 days`);
+    if (homeOpp.ga > 1.9) flags.push(`${homeName} heavy favourites`); // opponent leaks badly → likely rotation
+    if (awayOpp.ga > 1.9) flags.push(`${awayName} heavy favourites`);
+    if (flags.length) rotationNote = 'rotation risk — ' + flags.join('; ');
+  }
+
+  const out = { fixture: `${homeName} v ${awayName}`, home: homeName, away: awayName, lineupStatus, rotationNote, legs };
   memo.set(key, out);
   return out;
 }
@@ -262,7 +280,7 @@ export function recommend(data, oddsRows) {
 
   return {
     fixture: data.fixture, home: data.home, away: data.away, haveOdds,
-    lineupStatus: data.lineupStatus,
+    lineupStatus: data.lineupStatus, rotationNote: data.rotationNote,
     topLegs, tiers,
     meta: {
       legsScored: data.legs.length, parlayPool: poolSize, parlaysBuilt: parlays.length,
