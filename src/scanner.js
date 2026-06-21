@@ -37,6 +37,24 @@ async function pool(items, n, fn) {
   return out;
 }
 
+// Opponent adjustment: a player/team's form is vs AVERAGE opposition — scale it for THIS matchup.
+// Attacking props down-weight vs a strong defence (opponent concedes few); defensive props up-weight
+// vs a strong attack. Uses each team's goals for/against per game. ponytail: heuristic multiplier on
+// the probability, NOT a calibrated model — directionally right (fixes "weak team to score vs strong
+// side"); upgrade to a proper opponent-rated model if it needs to be sharper.
+const AVG_GOALS = 1.3; // ~typical goals per team per game, the baseline a factor of 1.0 maps to
+const ATTACK = new Set(['goals', 'assists', 'shots', 'sot', 'chances']);
+const DEFENSE = new Set(['tackles', 'fouls', 'fouled']);
+const avgOf = (form, k) => (form.length ? form.reduce((s, f) => s + f[k], 0) / form.length : null);
+function oppFactor(marketKey, opp) {
+  if (!opp || opp.ga == null) return 1;
+  const c = (x) => Math.max(0.45, Math.min(1.7, x));
+  if (ATTACK.has(marketKey) || marketKey === 'team_goals') return c(opp.ga / AVG_GOALS); // vs opponent's leakiness
+  if (DEFENSE.has(marketKey)) return c((opp.gf ?? AVG_GOALS) / AVG_GOALS);                // vs opponent's attack
+  return 1; // passes / saves / offsides / cards / result / dc — left raw
+}
+const clampP = (p) => Math.max(0.02, Math.min(0.97, p));
+
 // spec: { matchId?, home, away, homeId?, awayId? }. With a matchId we use THAT match's lineup
 // (predicted → confirmed) so the XI is the players actually starting; otherwise we fall back to the
 // recent-starter heuristic. lineupStatus tells the UI how much to trust it.
@@ -66,6 +84,15 @@ export async function legsForFixture(spec, lastN = 18) {
   }
   const roster = [...homeXI.map((p) => ({ ...p, team: homeName })), ...awayXI.map((p) => ({ ...p, team: awayName }))];
 
+  // team form first — drives both the team markets AND the per-player opponent adjustment
+  let homeForm = [], awayForm = [];
+  if (hId && aId) {
+    try { const [ht, at] = await Promise.all([getTeam(hId), getTeam(aId)]); homeForm = ht.form || []; awayForm = at.form || []; }
+    catch { /* form unavailable → no adjustment */ }
+  }
+  const homeOpp = { ga: avgOf(awayForm, 'ga'), gf: avgOf(awayForm, 'gf') }; // home XI faces the away team
+  const awayOpp = { ga: avgOf(homeForm, 'ga'), gf: avgOf(homeForm, 'gf') };
+
   const recs = await pool(roster, 5, async (pl) => {
     try { return { pl, rec: await playerRecords(pl.id, lastN) }; } catch { return null; }
   });
@@ -74,28 +101,27 @@ export async function legsForFixture(spec, lastN = 18) {
   for (const r of recs) {
     if (!r || !r.rec.records.length) continue;
     const { pl, rec } = r;
+    const opp = pl.team === homeName ? homeOpp : awayOpp;
     for (const [mk, m] of Object.entries(MARKETS)) {
+      const factor = oppFactor(mk, opp);
       for (const line of LINES[mk] || [0.5]) {
         const s = marketLine(rec.records, m, line).hitRate;
         if (!s.season.n) continue;
+        const pRaw = wilsonLower(s.season.hits, s.season.n);
         legs.push({
           id: `${rec.name}|${mk}|${line}`,
           player: rec.name, playerId: pl.id, team: pl.team,
           marketKey: mk, market: m.label, line, kind: m.kind,
-          sample: s.season.n, hits: s.season.hits, p: wilsonLower(s.season.hits, s.season.n),
+          sample: s.season.n, hits: s.season.hits, pRaw, p: clampP(pRaw * factor),
           l10: s.last10.rate, l5: s.last5.rate, season: s.season.rate,
           odds: null, implied: null, edge: null,
         });
       }
     }
   }
-  // team-level legs (result, total goals, BTTS, team goals) from each side's recent results
-  if (hId && aId) {
-    try {
-      const [ht, at] = await Promise.all([getTeam(hId), getTeam(aId)]);
-      legs.push(...teamLegs(homeName, ht.form || [], awayName, at.form || []));
-    } catch { /* team form unavailable */ }
-  }
+
+  // team-level legs (result, total goals, BTTS, team goals) — opponent-adjusted where it applies
+  legs.push(...teamLegs(homeName, homeForm, awayName, awayForm, homeOpp, awayOpp));
 
   const out = { fixture: `${homeName} v ${awayName}`, home: homeName, away: awayName, lineupStatus, legs };
   memo.set(key, out);
@@ -105,23 +131,25 @@ export async function legsForFixture(spec, lastN = 18) {
 // Team markets from each side's recent results (no extra fetch — getTeam already has `form`).
 // Per-match (Total Goals, BTTS) pool BOTH teams' matches; per-team (Result, Double Chance, Team
 // Goals) use that team's own form. Result is opponent-naive — flagged so the UI can de-trust its edge.
-function teamLegs(homeName, homeForm, awayName, awayForm) {
+function teamLegs(homeName, homeForm, awayName, awayForm, homeOpp, awayOpp) {
   const legs = [];
-  const add = (selection, team, marketKey, market, line, kind, hits, n, naive = false) => {
+  const add = (selection, team, marketKey, market, line, kind, hits, n, naive = false, factor = 1) => {
     if (!n) return;
+    const pRaw = wilsonLower(hits, n);
     legs.push({
       id: `${selection}|${marketKey}|${line}`, player: selection, playerId: null, team,
       marketKey, market, line, kind, isTeam: true, naive, corrKey: `${team}|${marketKey}`,
-      sample: n, hits, p: wilsonLower(hits, n), l10: hits / n, l5: null, season: hits / n,
+      sample: n, hits, pRaw, p: clampP(pRaw * factor), l10: hits / n, l5: null, season: hits / n,
       odds: null, implied: null, edge: null,
     });
   };
-  for (const [name, form] of [[homeName, homeForm], [awayName, awayForm]]) {
+  for (const [name, form, opp] of [[homeName, homeForm, homeOpp], [awayName, awayForm, awayOpp]]) {
     const n = form.length;
     if (!n) continue;
     add(name, name, 'result', 'Match result', null, 'atleast', form.filter((f) => f.win).length, n, true);
     add(`${name} or draw`, name, 'dc', 'Double chance', null, 'atleast', form.filter((f) => f.win || f.draw).length, n, true);
-    for (const line of [0.5, 1.5, 2.5]) add(name, name, 'team_goals', 'Team goals', line, 'ou', form.filter((f) => f.gf > line).length, n);
+    const tg = oppFactor('team_goals', opp); // down-weight scoring vs a strong defence
+    for (const line of [0.5, 1.5, 2.5]) add(name, name, 'team_goals', 'Team goals', line, 'ou', form.filter((f) => f.gf > line).length, n, false, tg);
   }
   const both = [...homeForm, ...awayForm], N = both.length;
   if (N) {
@@ -176,7 +204,7 @@ function buildParlays(legs, { poolSize = 16, maxSize = 6, haveOdds = false } = {
 const slimLeg = (l) => ({
   player: l.player, playerId: l.playerId, team: l.team, marketKey: l.marketKey, market: l.market,
   line: l.line, kind: l.kind, isTeam: l.isTeam || false, naive: l.naive || false,
-  p: l.p, sample: l.sample, l10: l.l10, odds: l.odds, edge: l.edge,
+  p: l.p, pRaw: l.pRaw, sample: l.sample, l10: l.l10, odds: l.odds, edge: l.edge,
 });
 const PAYOUT_CAP = 1000; // bet365 Bet Builder caps payout at 1000/1 — display reflects it
 const slimParlay = (p) => {
@@ -241,10 +269,11 @@ export function recommend(data, oddsRows) {
       oddsWarning: rawHaveOdds && !matched
         ? `captured odds are for other players (${[...new Set(oddsRows.map((r) => r.player))].slice(0, 3).join(', ')}…) — capture THIS match's Bet Builder`
         : null,
-      note: 'SINGLES are the edge — exact bet365 odds. VALUE = best +EV 2–4 leg combos; BIG RETURN = 3–4 legs ' +
-            'for a bigger payout. Same-match legs correlate, so a multi\'s real bet365 price + EV are LOWER than ' +
-            'the independent product shown, and payout caps at 1000/1. Conservative (Wilson-LB) probabilities, ' +
-            'small sample. Verify on bet365; bet responsibly.',
+      note: 'Probabilities are OPPONENT-ADJUSTED — a weak team\'s attacking props are down-weighted vs a strong ' +
+            'defence (and vice-versa). SINGLES are the edge (exact bet365 odds). VALUE = best +EV 2–4 leg combos; ' +
+            'BIG RETURN = 3–4 legs for a bigger payout. Same-match legs correlate, so a multi\'s real bet365 price ' +
+            '+ EV are LOWER than the independent product, payout caps at 1000/1. Conservative (Wilson-LB) on a small ' +
+            'sample. Verify on bet365; bet responsibly.',
     },
   };
 }
