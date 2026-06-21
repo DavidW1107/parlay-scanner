@@ -105,7 +105,7 @@ function buildParlays(legs, { poolSize = 16, maxSize = 6, haveOdds = false } = {
 }
 
 const slimLeg = (l) => ({
-  player: l.player, team: l.team, market: l.market, line: l.line, kind: l.kind,
+  player: l.player, playerId: l.playerId, team: l.team, market: l.market, line: l.line, kind: l.kind,
   p: l.p, sample: l.sample, l10: l.l10, odds: l.odds, edge: l.edge,
 });
 const slimParlay = (p) => ({
@@ -113,6 +113,22 @@ const slimParlay = (p) => ({
   ret10: p.odds ? +(10 * p.odds).toFixed(2) : null,
   legs: p.legs.map(slimLeg),
 });
+
+// Greedily keep the shown parlays distinct: cap how often any player-market is reused across the
+// set (by player+market, not the exact line — else "Llorente Tackles o2.5/o3.5" count as different
+// and one pick still dominates). Keeps the list from being ten near-identical multis.
+const legKey = (l) => `${l.player}|${l.market}`;
+function diversify(parlays, n, maxReuse = 2) {
+  const used = new Map();
+  const out = [];
+  for (const p of parlays) {
+    if (p.legs.some((l) => (used.get(legKey(l)) || 0) >= maxReuse)) continue;
+    p.legs.forEach((l) => used.set(legKey(l), (used.get(legKey(l)) || 0) + 1));
+    out.push(p);
+    if (out.length >= n) break;
+  }
+  return out;
+}
 
 // Top-level: legs (+optional odds) -> ranked legs + tiered parlays, all slimmed for JSON.
 export function recommend(data, oddsRows) {
@@ -122,14 +138,14 @@ export function recommend(data, oddsRows) {
 
   const byProb = [...parlays].sort((a, b) => b.prob - a.prob);
   const tiers = {
-    bankers: byProb.filter((p) => p.legs.length <= 3).slice(0, 6).map(slimParlay),
+    bankers: diversify(byProb.filter((p) => p.legs.length <= 3), 6).map(slimParlay),
     // Value = SMALL (2-leg) +EV parlays with a realistic chance. Ranking by raw EV over all sizes
     // is degenerate — EV compounds multiplicatively, so it always picks 5-leg longshots that never
     // land (P≈0). The clean value is in the single legs above; this is the honest step up from them.
     value: haveOdds
-      ? parlays.filter((p) => p.ev > 0 && p.legs.length === 2 && p.prob >= 0.1).sort((a, b) => b.ev - a.ev).slice(0, 8).map(slimParlay)
+      ? diversify(parlays.filter((p) => p.ev > 0 && p.legs.length === 2 && p.prob >= 0.1).sort((a, b) => b.ev - a.ev), 8).map(slimParlay)
       : [],
-    longshots: parlays.filter((p) => p.legs.length >= 4).sort((a, b) => (b.odds || b.fairOdds) - (a.odds || a.fairOdds)).slice(0, 6).map(slimParlay),
+    longshots: diversify(parlays.filter((p) => p.legs.length >= 4).sort((a, b) => (b.odds || b.fairOdds) - (a.odds || a.fairOdds)), 6).map(slimParlay),
   };
   const topLegs = legs
     .filter((l) => l.sample >= 6 && (!haveOdds || l.odds > 1))
@@ -141,8 +157,10 @@ export function recommend(data, oddsRows) {
     topLegs, tiers,
     meta: {
       legsScored: data.legs.length, parlayPool: poolSize, parlaysBuilt: parlays.length,
-      note: 'Conservative (Wilson-LB) probabilities on a small sample. Same-match legs are ' +
-            'correlated, so combined odds/returns are optimistic. A ranking tool, not a guarantee — bet responsibly.',
+      note: 'Single-leg odds are exact (captured from bet365). PARLAY odds/returns multiply legs as ' +
+            'if independent — bet365 Bet Builder prices same-match legs WITH correlation, so its real ' +
+            'quote is lower (often much). Probabilities are conservative (Wilson-LB) on a small sample. ' +
+            'A ranking tool, not a guarantee — verify the price on bet365 and bet responsibly.',
     },
   };
 }

@@ -116,6 +116,7 @@ class App:
         self.owns_server = False
         self.tabs = {}  # player id -> tree widget
         self._last = None  # (home, away, lastN) of the last value scan, for the odds refresh
+        self._reco_leg = {}  # recommendations row iid -> (playerId, name) for the stats drill-down
         root.title("Parlay Scanner")
         root.geometry("1180x760")
         root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -165,12 +166,14 @@ class App:
         self.reco.tag_configure("hdr", foreground=GOLD)
         self.reco.tag_configure("pos", foreground=GREEN)
         self.reco.tag_configure("neg", foreground=RED)
+        self.reco.bind("<Double-Button-1>", self._reco_click)  # leg -> backing stats
         self.nb.add(rf, text="★ Recommendations")
 
         ttk.Label(root, foreground="#666", padding=(12, 0, 0, 6), wraplength=1140,
-                  text="Find value scans every starter × market, scores each by a conservative (Wilson) probability, "
-                       "and builds parlays. Capture bet365 to merge real odds → edge, EV, returns. Parlays assume "
-                       "independence; same-match legs correlate, so combined odds are optimistic. Bet responsibly.").pack(fill="x")
+                  text="Find value ranks every starter × market by a conservative (Wilson) probability; Capture bet365 "
+                       "merges real odds → edge. Double-click any leg for the stats behind it. Single-leg odds are exact; "
+                       "parlay returns (~) multiply legs as if independent — bet365's Bet Builder quotes LESS (same-match "
+                       "correlation), so treat them as estimates. Bet responsibly.").pack(fill="x")
 
         threading.Thread(target=self._boot, daemon=True).start()
 
@@ -292,13 +295,15 @@ class App:
         od = rec["haveOdds"]
         t = self.reco
         t.delete(*t.get_children())
+        self._reco_leg.clear()
         self.nb.select(0)
 
         h = t.insert("", "end", text="TOP SINGLE LEGS  ·  by " + ("edge" if od else "confidence"), tags=("hdr",))
         for l in rec["topLegs"]:
             tag = "pos" if od and (l.get("edge") or 0) > 0 else ""
-            t.insert(h, "end", text="   " + self._leg_label(l) + f"   (n{l['sample']})",
-                     values=self._leg_vals(l, od), tags=(tag,))
+            iid = t.insert(h, "end", text="   " + self._leg_label(l) + f"   (n{l['sample']})",
+                           values=self._leg_vals(l, od), tags=(tag,))
+            self._reco_leg[iid] = (l.get("playerId"), l["player"])
 
         order = [("BANKERS  ·  most likely to land", "bankers")]
         if od:
@@ -309,17 +314,24 @@ class App:
             hh = t.insert("", "end", text=f"{title}   ({len(tiers)})", tags=("hdr",))
             for p in tiers:
                 odds = f"{p['odds']:.2f}" if p.get("odds") else f"{p['fairOdds']:.1f} fair"
-                ret = f"€{p['ret10']:.0f}" if p.get("ret10") else "—"
+                ret = f"~€{p['ret10']:.0f}" if p.get("ret10") else "—"   # ~ = independent estimate; bet365 quotes less
                 ev = f"{p['ev']:+.2f}" if p.get("ev") is not None else ""
                 tag = "pos" if (p.get("ev") or 0) > 0 else ""
                 par = t.insert(hh, "end", text=f"   {p['size']}-leg parlay",
                                values=(f"{round(p['prob'] * 100)}%", odds, ret, ev), tags=(tag,))
                 for l in p["legs"]:
-                    t.insert(par, "end", text="        " + self._leg_label(l), values=self._leg_vals(l, od))
+                    iid = t.insert(par, "end", text="        " + self._leg_label(l), values=self._leg_vals(l, od))
+                    self._reco_leg[iid] = (l.get("playerId"), l["player"])
 
         m = rec["meta"]
         tail = "odds merged ✓" if od else "Capture bet365 to add odds + returns"
         self._status(f"{rec['fixture']} — {m['legsScored']} legs scored, {m['parlaysBuilt']} parlays  ·  {tail}")
+
+    def _reco_click(self, ev):
+        # double-click a leg → open that player's full hit-rate grid (the stats behind the pick)
+        info = self._reco_leg.get(self.reco.identify_row(ev.y))
+        if info and info[0]:
+            self.load_player(info[0], info[1])
 
     # ----- player deep dive -----
     def load_player(self, pid, name):
