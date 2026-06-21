@@ -1,7 +1,7 @@
 // Automated value scanner: scan both likely XIs, score every player×market×line leg with a
 // conservative probability (Wilson lower bound), merge captured bet365 odds for edge/EV, and
 // assemble parlays in risk tiers. This is the "don't make me read the grid" layer.
-import { resolveFixture, likelyXI, getFixtureLineup } from './fotmob.js';
+import { resolveFixture, likelyXI, getFixtureLineup, getTeam } from './fotmob.js';
 import { playerRecords, LINES } from './scan.js';
 import { MARKETS } from './markets.js';
 import { marketLine, wilsonLower, combineParlay, impliedProb } from './engine.js';
@@ -45,22 +45,22 @@ export async function legsForFixture(spec, lastN = 18) {
   if (!spec.fresh && memo.has(key)) return memo.get(key); // fresh=1 re-fetches (e.g. lineup just confirmed)
 
   let homeName = spec.home, awayName = spec.away, homeXI, awayXI, lineupStatus = 'heuristic';
+  let hId = spec.homeId, aId = spec.awayId;
 
   if (spec.matchId) {
     let lu = null;
     try { lu = await getFixtureLineup(spec.matchId); } catch { /* no lineup released / fetch failed */ }
-    if (lu) { homeName = lu.homeName || homeName; awayName = lu.awayName || awayName; }
+    if (lu) { homeName = lu.homeName || homeName; awayName = lu.awayName || awayName; hId = hId || lu.homeId; aId = aId || lu.awayId; }
     if (lu?.home?.starters?.length && lu?.away?.starters?.length) {
       homeXI = lu.home.starters; awayXI = lu.away.starters; lineupStatus = lu.type || 'predicted';
-    } else {                                   // no lineup released yet → recent-starter heuristic
-      const hId = spec.homeId || lu?.homeId, aId = spec.awayId || lu?.awayId;
-      if (hId && aId) [homeXI, awayXI] = await Promise.all([likelyXI(hId), likelyXI(aId)]);
+    } else if (hId && aId) {                   // no lineup released yet → recent-starter heuristic
+      [homeXI, awayXI] = await Promise.all([likelyXI(hId), likelyXI(aId)]);
     }
   }
   if (!homeXI || !awayXI) {                    // manual team-name entry, or fallback
     const { home, away } = await resolveFixture(homeName, awayName);
     if (!home || !away) throw new Error('team not found — check spelling');
-    homeName = home.name; awayName = away.name;
+    homeName = home.name; awayName = away.name; hId = home.id; aId = away.id;
     [homeXI, awayXI] = await Promise.all([likelyXI(home.id), likelyXI(away.id)]);
     lineupStatus = 'heuristic';
   }
@@ -89,9 +89,46 @@ export async function legsForFixture(spec, lastN = 18) {
       }
     }
   }
+  // team-level legs (result, total goals, BTTS, team goals) from each side's recent results
+  if (hId && aId) {
+    try {
+      const [ht, at] = await Promise.all([getTeam(hId), getTeam(aId)]);
+      legs.push(...teamLegs(homeName, ht.form || [], awayName, at.form || []));
+    } catch { /* team form unavailable */ }
+  }
+
   const out = { fixture: `${homeName} v ${awayName}`, home: homeName, away: awayName, lineupStatus, legs };
   memo.set(key, out);
   return out;
+}
+
+// Team markets from each side's recent results (no extra fetch — getTeam already has `form`).
+// Per-match (Total Goals, BTTS) pool BOTH teams' matches; per-team (Result, Double Chance, Team
+// Goals) use that team's own form. Result is opponent-naive — flagged so the UI can de-trust its edge.
+function teamLegs(homeName, homeForm, awayName, awayForm) {
+  const legs = [];
+  const add = (selection, team, marketKey, market, line, kind, hits, n, naive = false) => {
+    if (!n) return;
+    legs.push({
+      id: `${selection}|${marketKey}|${line}`, player: selection, playerId: null, team,
+      marketKey, market, line, kind, isTeam: true, naive, corrKey: `${team}|${marketKey}`,
+      sample: n, hits, p: wilsonLower(hits, n), l10: hits / n, l5: null, season: hits / n,
+      odds: null, implied: null, edge: null,
+    });
+  };
+  for (const [name, form] of [[homeName, homeForm], [awayName, awayForm]]) {
+    const n = form.length;
+    if (!n) continue;
+    add(name, name, 'result', 'Match result', null, 'atleast', form.filter((f) => f.win).length, n, true);
+    add(`${name} or draw`, name, 'dc', 'Double chance', null, 'atleast', form.filter((f) => f.win || f.draw).length, n, true);
+    for (const line of [0.5, 1.5, 2.5]) add(name, name, 'team_goals', 'Team goals', line, 'ou', form.filter((f) => f.gf > line).length, n);
+  }
+  const both = [...homeForm, ...awayForm], N = both.length;
+  if (N) {
+    for (const line of [1.5, 2.5, 3.5]) add(`Over ${line}`, 'Match', 'ou_goals', 'Total goals', line, 'ou', both.filter((f) => f.total > line).length, N);
+    add('Both teams score', 'Match', 'btts', 'BTTS', null, 'atleast', both.filter((f) => f.btts).length, N);
+  }
+  return legs;
 }
 
 // Merge captured bet365 prices onto legs (fresh copies — never mutate the memo).
@@ -128,7 +165,7 @@ function buildParlays(legs, { poolSize = 16, maxSize = 6, haveOdds = false } = {
   for (let k = 2; k <= Math.min(maxSize, pool.length); k++) {
     for (const idx of kCombos(pool.length, k)) {
       const ls = idx.map((i) => pool[i]);
-      if (new Set(ls.map((l) => l.player)).size !== ls.length) continue;     // ≤1 leg per player (correlation guard)
+      if (new Set(ls.map((l) => l.corrKey || l.player)).size !== ls.length) continue; // ≤1 leg per player / team-market
       if (haveOdds && !ls.every((l) => l.odds > 1)) continue;                 // priced parlays only, so returns/EV are real
       out.push(combineParlay(ls));
     }
@@ -137,7 +174,8 @@ function buildParlays(legs, { poolSize = 16, maxSize = 6, haveOdds = false } = {
 }
 
 const slimLeg = (l) => ({
-  player: l.player, playerId: l.playerId, team: l.team, market: l.market, line: l.line, kind: l.kind,
+  player: l.player, playerId: l.playerId, team: l.team, marketKey: l.marketKey, market: l.market,
+  line: l.line, kind: l.kind, isTeam: l.isTeam || false, naive: l.naive || false,
   p: l.p, sample: l.sample, l10: l.l10, odds: l.odds, edge: l.edge,
 });
 const PAYOUT_CAP = 1000; // bet365 Bet Builder caps payout at 1000/1 — display reflects it

@@ -163,7 +163,7 @@ const findKey = (o, key, d = 0) => {
 };
 
 export function getTeam(teamId) {
-  return cached(`team3-${teamId}`, 12 * 3600e3, async () => {
+  return cached(`team4-${teamId}`, 12 * 3600e3, async () => {
     const pp = await pageProps(`https://www.fotmob.com/teams/${teamId}/x`);
     const sq = findKey(pp, 'squad');
     const groups = Array.isArray(sq) ? sq : sq?.squad || [];
@@ -173,11 +173,20 @@ export function getTeam(teamId) {
       for (const m of g.members || g.players || []) if (m?.id) players.push({ id: m.id, name: m.name, position: g.title });
     }
     const all = findKey(pp, 'allFixtures')?.fixtures || [];
-    const finished = all
-      .filter((f) => f?.status?.finished && !f.status.cancelled && f.pageUrl)
-      .sort((a, b) => new Date(b.status.utcTime) - new Date(a.status.utcTime)) // genuinely newest-first
-      .map((f) => ({ id: f.id, pageUrl: f.pageUrl, utc: f.status.utcTime }));
-    return { id: teamId, players, finished };
+    const fin = all
+      .filter((f) => f?.status?.finished && !f.status.cancelled)
+      .sort((a, b) => new Date(b.status.utcTime) - new Date(a.status.utcTime)); // newest-first
+    const finished = fin.filter((f) => f.pageUrl).map((f) => ({ id: f.id, pageUrl: f.pageUrl, utc: f.status.utcTime }));
+    // team form (for team markets): goals/result/btts straight off each fixture's home/away score
+    const form = fin
+      .filter((f) => typeof f.home?.score === 'number' && typeof f.away?.score === 'number')
+      .slice(0, 20)
+      .map((f) => {
+        const home = f.home.id === teamId;
+        const gf = home ? f.home.score : f.away.score, ga = home ? f.away.score : f.home.score;
+        return { gf, ga, total: f.home.score + f.away.score, btts: f.home.score > 0 && f.away.score > 0, win: gf > ga, draw: gf === ga, isHome: home };
+      });
+    return { id: teamId, players, finished, form };
   });
 }
 
