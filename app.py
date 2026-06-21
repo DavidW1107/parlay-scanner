@@ -175,10 +175,9 @@ class App:
         self.nb.add(rf, text="★ Recommendations")
 
         ttk.Label(root, foreground="#666", padding=(12, 0, 0, 6), wraplength=1140,
-                  text="SINGLES (top list) are the edge — exact bet365 odds, place on bet365; double-click any leg for the "
-                       "stats. PARLAYS over 1000/1 (→BF) exceed bet365's cap — place on BETFAIR (25-leg, uncapped). Parlay odds "
-                       "are estimated from bet365 single prices; Betfair's are usually close but verify before staking. "
-                       "Bet responsibly.").pack(fill="x")
+                  text="SINGLES (top list) are the edge — exact bet365 odds + return. Double-click any leg for the stats. "
+                       "VALUE = best +EV 2–4 leg combos; BIG RETURN = 3–4 legs for a bigger payout (capped at bet365's 1000/1). "
+                       "Parlay returns are estimates — same-match correlation makes bet365's real price lower. Bet responsibly.").pack(fill="x")
 
         threading.Thread(target=self._boot, daemon=True).start()
 
@@ -365,7 +364,8 @@ class App:
 
     def _leg_vals(self, l, od):
         ev = f"{l['edge'] * 100:+.1f}pp" if od and l.get("edge") is not None else ""
-        return (f"{round(l['p'] * 100)}%", f"{l['odds']:.2f}" if l.get("odds") else "—", "", ev)
+        ret = f"€{10 * l['odds']:.0f}" if l.get("odds") else ""
+        return (f"{round(l['p'] * 100)}%", f"{l['odds']:.2f}" if l.get("odds") else "—", ret, ev)
 
     def _render_recos(self, rec):
         if "error" in rec:
@@ -396,16 +396,17 @@ class App:
 
         order = []
         if od:
-            order.append(("VALUE  ·  small +EV combos", "value"))
-        order.append(("ACCUMULATOR  ·  most likely small combo", "bankers"))
-        order.append(("PARLAYS  ·  big multis — place on BETFAIR (no 1000/1 cap)", "parlays"))
+            order.append(("VALUE  ·  best +EV (2–4 legs)", "value"))
+            order.append(("BIG RETURN  ·  3–4 legs, biggest payout", "bigReturn"))
+        else:
+            order.append(("LIKELY  ·  most probable combos — Capture bet365 for edge", "likely"))
         for title, key in order:
             tiers = rec["tiers"].get(key, [])
             hh = t.insert("", "end", text=f"{title}   ({len(tiers)})", tags=("hdr",))
             for p in tiers:
-                o = p.get("odds")
-                if o:
-                    odds = (f"{o:.2f}" if o < 100 else f"{o:.0f}") + (" →BF" if p.get("betfair") else "")
+                so = p.get("shownOdds")
+                if so:
+                    odds = (f"{so:.2f}" if so < 100 else f"{so:.0f}") + (" cap" if p.get("capped") else "")
                 else:
                     odds = f"{p['fairOdds']:.1f} fair"
                 ret = f"~€{p['ret10']:.0f}" if p.get("ret10") else "—"   # ~ = independent estimate; bet365 quotes less

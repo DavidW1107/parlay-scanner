@@ -140,13 +140,16 @@ const slimLeg = (l) => ({
   player: l.player, playerId: l.playerId, team: l.team, market: l.market, line: l.line, kind: l.kind,
   p: l.p, sample: l.sample, l10: l.l10, odds: l.odds, edge: l.edge,
 });
-const PAYOUT_CAP = 1000; // bet365 Bet Builder max; over this → place on Betfair (25-leg, uncapped)
-const slimParlay = (p) => ({
-  size: p.legs.length, prob: p.prob, odds: p.odds, fairOdds: p.fairOdds, ev: p.ev,
-  ret10: p.odds ? +(10 * p.odds).toFixed(2) : null,        // uncapped — Betfair pays it
-  betfair: p.odds != null && p.odds > PAYOUT_CAP,          // exceeds bet365's 1000/1 → place on Betfair
-  legs: p.legs.map(slimLeg),
-});
+const PAYOUT_CAP = 1000; // bet365 Bet Builder caps payout at 1000/1 — display reflects it
+const slimParlay = (p) => {
+  const shownOdds = p.odds == null ? null : Math.min(p.odds, PAYOUT_CAP);
+  return {
+    size: p.legs.length, prob: p.prob, odds: p.odds, shownOdds, capped: p.odds != null && p.odds > PAYOUT_CAP,
+    fairOdds: p.fairOdds, ev: p.ev,
+    ret10: shownOdds ? +(10 * shownOdds).toFixed(2) : null,
+    legs: p.legs.map(slimLeg),
+  };
+};
 
 // Greedily keep the shown parlays distinct: cap how often any player-market is reused across the
 // set (by player+market, not the exact line — else "Llorente Tackles o2.5/o3.5" count as different
@@ -175,18 +178,16 @@ export function recommend(data, oddsRows) {
   const { parlays, poolSize } = buildParlays(legs, { haveOdds });
 
   const byProb = [...parlays].sort((a, b) => b.prob - a.prob);
-  // Headline is SINGLES (topLegs) — exact odds, real edge, no cap. Then: small +EV combos (value),
-  // a likely small accumulator (bankers), and bigger multis (parlays) for when you want them — all
-  // with payout shown CAPPED at 1000/1, since that's the most bet365 pays on a Bet Builder.
-  const tiers = {
-    value: haveOdds
-      ? diversify(parlays.filter((p) => p.ev > 0 && p.legs.length === 2 && p.prob >= 0.1).sort((a, b) => b.ev - a.ev), 8).map(slimParlay)
-      : [],
-    bankers: diversify(byProb.filter((p) => p.legs.length <= 3), 6).map(slimParlay),
-    // Big multis for Betfair (no 1000/1 cap) — ranked by return (uncapped). Ones over 1000/1 are
-    // flagged → Betfair; smaller ones can go on bet365. prob floor drops numerically-absurd lottery.
-    parlays: diversify(parlays.filter((p) => p.legs.length >= 3 && p.prob >= 0.003)
-      .sort((a, b) => (b.odds || b.fairOdds) - (a.odds || a.fairOdds)), 6).map(slimParlay),
+  // Headline is SINGLES (topLegs). With odds: VALUE = best +EV 2–4 leg combos (the edge); BIG RETURN
+  // = 3–4 legs for a bigger (capped) payout, still built from +edge legs. Pre-odds: LIKELY = highest
+  // win-prob small combos as a placeholder until you capture.
+  const tiers = haveOdds ? {
+    value: diversify(parlays.filter((p) => p.ev > 0 && p.legs.length >= 2 && p.legs.length <= 4 && p.prob >= 0.08)
+      .sort((a, b) => b.ev - a.ev), 8).map(slimParlay),
+    bigReturn: diversify(parlays.filter((p) => p.legs.length >= 3 && p.legs.length <= 4 && p.prob >= 0.02)
+      .sort((a, b) => (Math.min(b.odds || 0, PAYOUT_CAP) - Math.min(a.odds || 0, PAYOUT_CAP)) || b.prob - a.prob), 6).map(slimParlay),
+  } : {
+    likely: diversify(byProb.filter((p) => p.legs.length >= 2 && p.legs.length <= 3), 6).map(slimParlay),
   };
   const topLegs = legs
     .filter((l) => l.sample >= 6 && (!haveOdds || l.odds > 1))
@@ -202,11 +203,10 @@ export function recommend(data, oddsRows) {
       oddsWarning: rawHaveOdds && !matched
         ? `captured odds are for other players (${[...new Set(oddsRows.map((r) => r.player))].slice(0, 3).join(', ')}…) — capture THIS match's Bet Builder`
         : null,
-      note: 'SINGLES (top list) are the edge — exact bet365 odds, place on bet365. PARLAYS over 1000/1 ' +
-            'exceed bet365\'s Bet Builder cap → place on BETFAIR (25-leg, uncapped). Caveat: parlay odds are ' +
-            'estimated from bet365 SINGLE prices (independent product) — Betfair\'s single prices are usually ' +
-            'close (strong edges survive, thin ones may not) but its correlated combined price differs, so ' +
-            'VERIFY on Betfair before staking. Conservative (Wilson-LB) probabilities, small sample. Bet responsibly.',
+      note: 'SINGLES are the edge — exact bet365 odds. VALUE = best +EV 2–4 leg combos; BIG RETURN = 3–4 legs ' +
+            'for a bigger payout. Same-match legs correlate, so a multi\'s real bet365 price + EV are LOWER than ' +
+            'the independent product shown, and payout caps at 1000/1. Conservative (Wilson-LB) probabilities, ' +
+            'small sample. Verify on bet365; bet responsibly.',
     },
   };
 }
