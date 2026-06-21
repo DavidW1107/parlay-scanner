@@ -205,7 +205,7 @@ class App:
         try:
             self.server, self.owns_server = start_server()
         except Exception as e:
-            return self.root.after(0, lambda: self._status(str(e), err=True))
+            return self.root.after(0, lambda e=e: self._status(str(e), err=True))
         self.root.after(0, lambda: (self._status("ready — pick a fixture (📅) or enter two teams, then Find value"),
                                     self.btn_fx.config(state="normal"),
                                     self.btn_val.config(state="normal"),
@@ -221,7 +221,7 @@ class App:
             try:
                 res = work()
             except Exception as e:
-                self.root.after(0, lambda: self._status(f"error: {e}", err=True))
+                self.root.after(0, lambda e=e: self._status(f"error: {e}", err=True))
                 return
             self.root.after(0, lambda: done(res))
         threading.Thread(target=run, daemon=True).start()
