@@ -1,7 +1,7 @@
 // Automated value scanner: scan both likely XIs, score every player×market×line leg with a
 // conservative probability (Wilson lower bound), merge captured bet365 odds for edge/EV, and
 // assemble parlays in risk tiers. This is the "don't make me read the grid" layer.
-import { resolveFixture, likelyXI } from './fotmob.js';
+import { resolveFixture, likelyXI, getFixtureLineup } from './fotmob.js';
 import { playerRecords, LINES } from './scan.js';
 import { MARKETS } from './markets.js';
 import { marketLine, wilsonLower, combineParlay, impliedProb } from './engine.js';
@@ -26,22 +26,54 @@ function nameMatch(a, b) {
 // memo so a follow-up "with odds" call reuses the (expensive) FotMob scan instead of re-fetching.
 const memo = new Map();
 
-export async function legsForFixture(homeName, awayName, lastN = 18) {
-  const key = `${homeName}|${awayName}|${lastN}`.toLowerCase();
-  if (memo.has(key)) return memo.get(key);
+// Run fn over items with at most n concurrent. Matters for the cold first scan: a national-team
+// fixture's ~22 players come from different clubs (no shared match cache), so sequential is slow.
+async function pool(items, n, fn) {
+  const out = [];
+  let i = 0;
+  await Promise.all(Array.from({ length: Math.min(n, items.length) }, async () => {
+    while (i < items.length) { const idx = i++; out[idx] = await fn(items[idx]); }
+  }));
+  return out;
+}
 
-  const { home, away } = await resolveFixture(homeName, awayName);
-  if (!home || !away) throw new Error('team not found — check spelling');
-  const [hx, ax] = await Promise.all([likelyXI(home.id), likelyXI(away.id)]);
-  const roster = [...hx.map((p) => ({ ...p, team: home.name })), ...ax.map((p) => ({ ...p, team: away.name }))];
+// spec: { matchId?, home, away, homeId?, awayId? }. With a matchId we use THAT match's lineup
+// (predicted → confirmed) so the XI is the players actually starting; otherwise we fall back to the
+// recent-starter heuristic. lineupStatus tells the UI how much to trust it.
+export async function legsForFixture(spec, lastN = 18) {
+  const key = `${spec.matchId || `${spec.home}|${spec.away}`}|${lastN}`.toLowerCase();
+  if (!spec.fresh && memo.has(key)) return memo.get(key); // fresh=1 re-fetches (e.g. lineup just confirmed)
+
+  let homeName = spec.home, awayName = spec.away, homeXI, awayXI, lineupStatus = 'heuristic';
+
+  if (spec.matchId) {
+    let lu = null;
+    try { lu = await getFixtureLineup(spec.matchId); } catch { /* no lineup released / fetch failed */ }
+    if (lu) { homeName = lu.homeName || homeName; awayName = lu.awayName || awayName; }
+    if (lu?.home?.starters?.length && lu?.away?.starters?.length) {
+      homeXI = lu.home.starters; awayXI = lu.away.starters; lineupStatus = lu.type || 'predicted';
+    } else {                                   // no lineup released yet → recent-starter heuristic
+      const hId = spec.homeId || lu?.homeId, aId = spec.awayId || lu?.awayId;
+      if (hId && aId) [homeXI, awayXI] = await Promise.all([likelyXI(hId), likelyXI(aId)]);
+    }
+  }
+  if (!homeXI || !awayXI) {                    // manual team-name entry, or fallback
+    const { home, away } = await resolveFixture(homeName, awayName);
+    if (!home || !away) throw new Error('team not found — check spelling');
+    homeName = home.name; awayName = away.name;
+    [homeXI, awayXI] = await Promise.all([likelyXI(home.id), likelyXI(away.id)]);
+    lineupStatus = 'heuristic';
+  }
+  const roster = [...homeXI.map((p) => ({ ...p, team: homeName })), ...awayXI.map((p) => ({ ...p, team: awayName }))];
+
+  const recs = await pool(roster, 5, async (pl) => {
+    try { return { pl, rec: await playerRecords(pl.id, lastN) }; } catch { return null; }
+  });
 
   const legs = [];
-  for (const pl of roster) {
-    // ponytail: sequential — teammates share match payloads (cached after the first), so the
-    // real cost is ~2 squads of matches, not 22×. Parallelise only if first-scan latency bites.
-    let rec;
-    try { rec = await playerRecords(pl.id, lastN); } catch { continue; }
-    if (!rec.records.length) continue;
+  for (const r of recs) {
+    if (!r || !r.rec.records.length) continue;
+    const { pl, rec } = r;
     for (const [mk, m] of Object.entries(MARKETS)) {
       for (const line of LINES[mk] || [0.5]) {
         const s = marketLine(rec.records, m, line).hitRate;
@@ -57,7 +89,7 @@ export async function legsForFixture(homeName, awayName, lastN = 18) {
       }
     }
   }
-  const out = { fixture: `${home.name} v ${away.name}`, home: home.name, away: away.name, legs };
+  const out = { fixture: `${homeName} v ${awayName}`, home: homeName, away: awayName, lineupStatus, legs };
   memo.set(key, out);
   return out;
 }
@@ -154,6 +186,7 @@ export function recommend(data, oddsRows) {
 
   return {
     fixture: data.fixture, home: data.home, away: data.away, haveOdds,
+    lineupStatus: data.lineupStatus,
     topLegs, tiers,
     meta: {
       legsScored: data.legs.length, parlayPool: poolSize, parlaysBuilt: parlays.length,
@@ -168,7 +201,7 @@ export function recommend(data, oddsRows) {
 // --- demo: real fixture, confidence-only — run `node src/scanner.js "Man City" "Arsenal"` ---
 if (process.argv[1] === (await import('url')).fileURLToPath(import.meta.url)) {
   const [, , home = 'Man City', away = 'Arsenal'] = process.argv;
-  const data = await legsForFixture(home, away, 18);
+  const data = await legsForFixture({ home, away }, 18);
   const rec = recommend(data, null);
   console.log(`\n${rec.fixture} — ${rec.meta.legsScored} legs scored, pool ${rec.meta.parlayPool}\n`);
   console.log('Top single legs by confidence:');

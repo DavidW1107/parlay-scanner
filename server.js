@@ -2,7 +2,7 @@
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { resolveFixture, getTeam, likelyXI, close } from './src/fotmob.js';
+import { resolveFixture, getTeam, likelyXI, listFixtures, close } from './src/fotmob.js';
 import { deepDive } from './src/scan.js';
 import { legsForFixture, recommend } from './src/scanner.js';
 
@@ -35,11 +35,21 @@ const server = createServer(async (req, res) => {
       return json(res, 200, await deepDive(id, Number(q.get('lastN')) || 10));
     }
 
+    // Upcoming fixtures for a date (YYYY-MM-DD) — the picker.
+    if (url.pathname === '/api/fixtures') {
+      const date = q.get('date') || new Date().toISOString().slice(0, 10);
+      return json(res, 200, await listFixtures(date));
+    }
+
     // Automated value scan → ranked legs + tiered parlays. useOdds=1 merges the last bet365 capture.
     if (url.pathname === '/api/recommend') {
+      const num = (k) => (q.get(k) ? Number(q.get(k)) : null);
       let data;
-      try { data = await legsForFixture(q.get('home') || '', q.get('away') || '', Number(q.get('lastN')) || 18); }
-      catch (e) { return json(res, 404, { error: String(e?.message || e) }); }
+      try {
+        data = await legsForFixture(
+          { matchId: num('matchId'), home: q.get('home') || '', away: q.get('away') || '', homeId: num('homeId'), awayId: num('awayId'), fresh: !!q.get('fresh') },
+          Number(q.get('lastN')) || 18);
+      } catch (e) { return json(res, 404, { error: String(e?.message || e) }); }
       let oddsRows = null;
       if (q.get('useOdds')) {
         try { oddsRows = JSON.parse(await readFile(CAPTURE, 'utf8')).rows; } catch { /* no capture yet */ }

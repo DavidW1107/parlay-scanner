@@ -12,6 +12,7 @@ const UA =
 
 let _browser = null;
 let _ctx = null;
+let _dataPage = null;
 async function ctx() {
   if (_ctx) return _ctx;
   _browser = await chromium.launch({ headless: true });
@@ -20,7 +21,23 @@ async function ctx() {
 }
 export async function close() {
   if (_browser) await _browser.close();
-  _browser = _ctx = null;
+  _browser = _ctx = _dataPage = null;
+}
+
+// Call a FotMob JSON API from INSIDE a loaded fotmob page, so its own fetch wrapper adds the
+// required token. A persistent page is kept warm for this. (api/data/matches needs the token;
+// reading __NEXT_DATA__ doesn't cover the matches-by-date list.)
+async function dataFetch(path) {
+  if (!_dataPage || _dataPage.isClosed()) {
+    _dataPage = await (await ctx()).newPage();
+    await _dataPage.goto('https://www.fotmob.com/', { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await _dataPage.waitForTimeout(1500);
+  }
+  return _dataPage.evaluate(async (p) => {
+    const r = await fetch(p);
+    if (!r.ok) throw new Error('fotmob fetch ' + r.status);
+    return r.json();
+  }, path);
 }
 
 // disk cache: ttlMs=0 → never expires (finished matches are immutable).
@@ -205,6 +222,45 @@ export async function resolveFixture(homeName, awayName) {
   const pick = async (q) => (await suggest(q)).teams[0] || null;
   const [home, away] = await Promise.all([pick(homeName), pick(awayName)]);
   return { home, away };
+}
+
+// --- Upcoming fixtures (for the picker) ---
+// Popular domestic leagues + cups; internationals/World Cup come in via ccode === 'INT'.
+const POPULAR = new Set([47, 87, 54, 55, 53, 42, 73, 48, 130, 50, 67, 9]);
+export function listFixtures(dateStr) {
+  const ymd = dateStr.replace(/-/g, '');
+  return cached(`fixtures-${ymd}`, 20 * 60e3, async () => {
+    const data = await dataFetch(`/api/data/matches?date=${ymd}&timezone=Europe/London`);
+    const out = [];
+    for (const L of data.leagues || []) {
+      if (L.ccode !== 'INT' && !POPULAR.has(L.id)) continue;
+      for (const m of L.matches || []) {
+        out.push({
+          matchId: m.id, home: m.home?.name, away: m.away?.name, homeId: m.home?.id, awayId: m.away?.id,
+          league: L.name, utc: m.status?.utcTime, started: !!m.status?.started, finished: !!m.status?.finished,
+        });
+      }
+    }
+    return out;
+  });
+}
+
+// --- A specific fixture's lineup, with status (predicted | confirmed | …) ---
+// Short TTL on purpose: a "predicted" XI becomes "confirmed" ~1h before kickoff. Don't cache empty
+// (no lineup released yet) so it re-fetches until one appears.
+export function getFixtureLineup(matchId) {
+  return cached(`fxlu-${matchId}`, 8 * 60e3, async () => {
+    const pp = await pageProps(`https://www.fotmob.com/match/${matchId}`);
+    const lu = pp.content?.lineup;
+    const g = pp.general || {};
+    const side = (t) => (t ? { id: t.id ?? t.teamId, starters: (t.starters || []).map((s) => ({ id: s.id, name: s.name, positionId: s.positionId })) } : null);
+    return {
+      type: lu?.lineupType || null, // 'predicted' | 'confirmed' | 'standard' (finished)
+      home: side(lu?.homeTeam), away: side(lu?.awayTeam),
+      homeName: g.homeTeam?.name, awayName: g.awayTeam?.name,
+      homeId: g.homeTeam?.id, awayId: g.awayTeam?.id,
+    };
+  }, (d) => (d.home?.starters?.length || d.away?.starters?.length) ? true : false);
 }
 
 // --- self-check: run `node src/fotmob.js` ---

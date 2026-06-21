@@ -10,7 +10,7 @@ Stdlib only — tkinter, urllib, json, subprocess, threading. No pip installs.
 Run:  python app.py        (needs `npm install` + `npx playwright install chromium` once)
 Test: python app.py --selftest
 """
-import json, os, re, shutil, subprocess, sys, threading, time, unicodedata
+import datetime, json, os, re, shutil, subprocess, sys, threading, time, unicodedata
 import urllib.request, urllib.parse
 import tkinter as tk
 from tkinter import ttk
@@ -116,6 +116,7 @@ class App:
         self.owns_server = False
         self.tabs = {}  # player id -> tree widget
         self._last = None  # (home, away, lastN) of the last value scan, for the odds refresh
+        self._match = None  # picked fixture {matchId, home, away, homeId, awayId} -> use its lineup
         self._reco_leg = {}  # recommendations row iid -> (playerId, name) for the stats drill-down
         root.title("Parlay Scanner")
         root.geometry("1180x760")
@@ -129,14 +130,18 @@ class App:
         self.e_n = ttk.Entry(bar, width=5)
         self.e_n.insert(0, "18")
         self.e_n.pack(side="left")
+        self.btn_fx = ttk.Button(bar, text="📅 Fixtures", command=self.open_fixtures, state="disabled")
+        self.btn_fx.pack(side="left", padx=(0, 8))
         self.btn_val = ttk.Button(bar, text="★ Find value", command=self.find_value, state="disabled")
-        self.btn_val.pack(side="left", padx=8)
+        self.btn_val.pack(side="left")
         self.btn = ttk.Button(bar, text="Scan squads", command=self.scan, state="disabled")
-        self.btn.pack(side="left")
+        self.btn.pack(side="left", padx=8)
         self.btn_cap = ttk.Button(bar, text="Capture bet365", command=self.capture_bet365, state="disabled")
-        self.btn_cap.pack(side="left", padx=8)
+        self.btn_cap.pack(side="left")
         for e in (self.e_home, self.e_away, self.e_n):
             e.bind("<Return>", lambda _ev: self.find_value())
+        for e in (self.e_home, self.e_away):  # typing a team by hand drops a picked fixture's matchId
+            e.bind("<KeyRelease>", lambda _ev: setattr(self, "_match", None))
 
         self.status = ttk.Label(root, text="starting data server…", foreground=GOLD,
                                 padding=(12, 0, 0, 4))
@@ -202,7 +207,8 @@ class App:
             self.server, self.owns_server = start_server()
         except Exception as e:
             return self.root.after(0, lambda: self._status(str(e), err=True))
-        self.root.after(0, lambda: (self._status("ready — enter two teams and Find value"),
+        self.root.after(0, lambda: (self._status("ready — pick a fixture (📅) or enter two teams, then Find value"),
+                                    self.btn_fx.config(state="normal"),
                                     self.btn_val.config(state="normal"),
                                     self.btn.config(state="normal"),
                                     self.btn_cap.config(state="normal")))
@@ -269,16 +275,88 @@ class App:
             return
         n = self.e_n.get().strip() or "18"
         self._last = (home, away, n)
-        self._status(f"scanning {home} vs {away} — every starter × market (first run can take 1–2 min)…")
-        self._recommend(use_odds=False)
+        via = " (predicted lineup)" if self._match else ""
+        self._status(f"scanning {home} vs {away}{via} — every starter × market (first run 1–2 min)…")
+        self._recommend(use_odds=False, fresh=True)
 
-    def _recommend(self, use_odds):
+    def _recommend(self, use_odds, fresh=False):
         if not self._last:
             return
         home, away, n = self._last
-        url = (f"/api/recommend?home={urllib.parse.quote(home)}&away={urllib.parse.quote(away)}"
-               f"&lastN={urllib.parse.quote(n)}" + ("&useOdds=1" if use_odds else ""))
+        q = urllib.parse.quote
+        url = f"/api/recommend?home={q(home)}&away={q(away)}&lastN={q(n)}"
+        if self._match and self._match.get("matchId"):
+            m = self._match
+            url += f"&matchId={m['matchId']}"
+            if m.get("homeId"):
+                url += f"&homeId={m['homeId']}"
+            if m.get("awayId"):
+                url += f"&awayId={m['awayId']}"
+        if use_odds:
+            url += "&useOdds=1"
+        if fresh:
+            url += "&fresh=1"
         self._async(lambda: api(url), self._render_recos)
+
+    # ----- fixture picker -----
+    def open_fixtures(self):
+        self._status("loading upcoming fixtures…")
+
+        def work():
+            today = datetime.date.today()
+            out = []
+            for i in range(3):  # today + next 2 days
+                ds = (today + datetime.timedelta(days=i)).isoformat()
+                try:
+                    for f in api(f"/api/fixtures?date={ds}"):
+                        if not f.get("finished"):
+                            f["date"] = ds
+                            out.append(f)
+                except Exception:
+                    pass
+            return out
+
+        self._async(work, self._show_fixtures)
+
+    def _show_fixtures(self, fixtures):
+        if not fixtures:
+            return self._status("no upcoming fixtures found in popular leagues", err=True)
+        self._status(f"{len(fixtures)} upcoming fixtures — double-click one to scan")
+        top = tk.Toplevel(self.root)
+        top.title("Upcoming fixtures — double-click to scan")
+        top.geometry("580x540")
+        tv = ttk.Treeview(top, columns=("league",), show="tree headings")
+        tv.heading("#0", text="Fixture")
+        tv.column("#0", width=380, anchor="w")
+        tv.heading("league", text="League")
+        tv.column("league", width=180, anchor="w")
+        sb = ttk.Scrollbar(top, command=tv.yview)
+        tv.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        tv.pack(side="left", fill="both", expand=True)
+        tv.tag_configure("hdr", foreground=GOLD)
+        rowmap, last_date, hdr = {}, None, ""
+        for f in sorted(fixtures, key=lambda x: (x["date"], x.get("utc") or "")):
+            if f["date"] != last_date:
+                last_date = f["date"]
+                hdr = tv.insert("", "end", text=f["date"], open=True, tags=("hdr",))
+            ko = (f.get("utc") or "")[11:16]
+            iid = tv.insert(hdr, "end", text=f"  {ko}  {f['home']} v {f['away']}", values=(f.get("league", ""),))
+            rowmap[iid] = f
+
+        def pick(ev):
+            f = rowmap.get(tv.identify_row(ev.y))
+            if not f:
+                return
+            self._match = {"matchId": f["matchId"], "home": f["home"], "away": f["away"],
+                           "homeId": f.get("homeId"), "awayId": f.get("awayId")}
+            for entry, val in ((self.e_home, f["home"]), (self.e_away, f["away"])):
+                entry.delete(0, "end")
+                entry.insert(0, val)
+            top.destroy()
+            self.find_value()
+
+        tv.bind("<Double-Button-1>", pick)
 
     @staticmethod
     def _leg_label(l):
@@ -297,6 +375,14 @@ class App:
         t.delete(*t.get_children())
         self._reco_leg.clear()
         self.nb.select(0)
+
+        status = rec.get("lineupStatus") or "heuristic"
+        badge = {
+            "confirmed": ("✓ CONFIRMED LINEUP — these players are starting", "pos"),
+            "predicted": ("◑ PREDICTED XI — not confirmed yet; re-run Find value near kickoff", "hdr"),
+            "heuristic": ("⚠ ESTIMATED from recent starters — no lineup released, players may not start", "neg"),
+        }.get(status, (f"lineup: {status}", "hdr"))
+        t.insert("", "end", text=badge[0], tags=(badge[1],))
 
         h = t.insert("", "end", text="TOP SINGLE LEGS  ·  by " + ("edge" if od else "confidence"), tags=("hdr",))
         for l in rec["topLegs"]:
