@@ -1,0 +1,15 @@
+{
+  "name": "parlay-scanner",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "description": "Per-fixture player stats vs bet365 odds value scanner",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node src/engine.js",
+    "check:fotmob": "node src/fotmob.js"
+  },
+  "dependencies": {
+    "playwright": "^1.61.0"
+  }
+}

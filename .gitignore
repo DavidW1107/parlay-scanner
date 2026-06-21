@@ -1,0 +1,19 @@
+node_modules/
+__pycache__/
+
+# Logged-in bet365 browser sessions — cookies/credentials. NEVER commit.
+.b365profile/
+.b365cdp/
+
+# Machine-local fetched data (regenerates on demand) + dev logs
+.cache/
+*.log
+
+# Throwaway probe/exploration artifacts (screenshots + DOM dumps)
+_*.png
+_*.json
+_*.txt
+
+# Obsolete exploration scripts (superseded by capture-bet365.mjs)
+probe-*.mjs
+attended-*.mjs

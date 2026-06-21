@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Parlay Scanner</title>
+<style>
+  :root {
+    --bg: #0a0908; --panel: #14110f; --line: #262019; --ink: #ece6d8; --mut: #8d8676;
+    --gold: #c9a24b; --green: #56b06f; --red: #cd5a4b; --r: 9px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, Segoe UI, Inter, sans-serif; }
+  .mono { font-family: ui-monospace, "JetBrains Mono", "Cascadia Code", Consolas, monospace; font-variant-numeric: tabular-nums; }
+  header { padding: 22px 28px; border-bottom: 1px solid var(--line); display: flex; align-items: baseline; gap: 14px; }
+  header h1 { margin: 0; font-size: 19px; letter-spacing: -.01em; }
+  header .tag { color: var(--gold); font-size: 11px; letter-spacing: .18em; text-transform: uppercase; }
+  main { padding: 22px 28px; max-width: 1500px; margin: 0 auto; }
+  .bar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 20px; }
+  input, button { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--r); padding: 9px 12px; }
+  input::placeholder { color: var(--mut); }
+  button { background: var(--gold); color: #1a1408; border: 0; font-weight: 600; cursor: pointer; }
+  button:hover { filter: brightness(1.08); }
+  .bar input.team { width: 200px; } .bar input.n { width: 64px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .squad { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 14px 16px; }
+  .squad h2 { margin: 0 0 10px; font-size: 14px; color: var(--gold); }
+  .squad .pos { color: var(--mut); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; margin: 10px 0 4px; }
+  .player { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; margin: 3px 4px 0 0;
+    border: 1px solid var(--line); border-radius: 999px; cursor: pointer; font-size: 13px; }
+  .player:hover { border-color: var(--gold); }
+  .player.active { background: var(--gold); color: #1a1408; border-color: var(--gold); }
+  .player.xi { border-color: var(--gold); color: var(--ink); }
+  #detail { margin-top: 22px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 18px 20px; }
+  #detail .card + .card { margin-top: 16px; }
+  .card h2 { margin: 0 0 4px; font-size: 17px; }
+  .card .sub { color: var(--mut); font-size: 12px; margin-bottom: 14px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: right; padding: 7px 9px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--mut); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; font-weight: 500; }
+  td.l, th.l { text-align: left; }
+  tr.mkt-head td { color: var(--gold); font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+    border-bottom: 0; padding-top: 16px; }
+  .hr { color: var(--ink); } .hr.lo { color: var(--mut); }
+  .smp { color: var(--mut); font-size: 11px; }
+  input.odds { width: 74px; padding: 5px 8px; text-align: right; }
+  .edge.pos { color: var(--green); font-weight: 600; } .edge.neg { color: var(--red); }
+  .muted { color: var(--mut); } .err { color: var(--red); }
+  .legend { color: var(--mut); font-size: 12px; margin-top: 10px; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>Parlay Scanner</h1>
+    <span class="tag">stats × odds — value finder</span>
+  </header>
+  <main>
+    <div class="bar">
+      <input class="team" id="home" placeholder="Home team (e.g. Man City)" />
+      <input class="team" id="away" placeholder="Away team (e.g. Arsenal)" />
+      <input class="n mono" id="lastN" value="10" title="last N games" />
+      <button id="scan">Scan fixture</button>
+      <span id="status" class="muted"></span>
+    </div>
+    <div class="grid2">
+      <div class="squad" id="homeSquad"></div>
+      <div class="squad" id="awaySquad"></div>
+    </div>
+    <div id="detail"></div>
+    <p class="legend">Hit-rate = share of last-N games the player beat the line (≥60 min only). Type the bet365 price (decimal <b>1.83</b> or fractional <b>5/6</b>); edge = hit-rate − implied. Positive edge = value.</p>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

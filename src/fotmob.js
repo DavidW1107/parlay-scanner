@@ -1,0 +1,234 @@
+// FotMob data layer — Playwright-driven (the site supplies its own x-mas token,
+// so we read its embedded __NEXT_DATA__ instead of reverse-engineering endpoints).
+// Browser launched once and reused; finished-match payloads cached to disk forever.
+import { chromium } from 'playwright';
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'fs';
+import { fileURLToPath } from 'url';
+
+const CACHE_DIR = fileURLToPath(new URL('../.cache/', import.meta.url));
+mkdirSync(CACHE_DIR, { recursive: true });
+const UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+let _browser = null;
+let _ctx = null;
+async function ctx() {
+  if (_ctx) return _ctx;
+  _browser = await chromium.launch({ headless: true });
+  _ctx = await _browser.newContext({ userAgent: UA, locale: 'en-GB' });
+  return _ctx;
+}
+export async function close() {
+  if (_browser) await _browser.close();
+  _browser = _ctx = null;
+}
+
+// disk cache: ttlMs=0 → never expires (finished matches are immutable).
+// inflight map coalesces concurrent identical fetches (e.g. teammates sharing a match).
+const inflight = new Map();
+function cached(key, ttlMs, fn, keep = () => true) {
+  const f = `${CACHE_DIR}${key.replace(/[^\w.-]/g, '_')}.json`;
+  if (existsSync(f)) {
+    const { ts, data } = JSON.parse(readFileSync(f, 'utf8'));
+    if (ttlMs === 0 || Date.now() - ts < ttlMs) return data;
+  }
+  if (inflight.has(key)) return inflight.get(key);
+  const pr = Promise.resolve(fn()).then(
+    // keep(): don't persist empty/incomplete payloads (e.g. an upcoming match with no lineup
+    // yet) under the forever-TTL, or it poisons the cache once the match is actually played.
+    (data) => { if (keep(data)) writeFileSync(f, JSON.stringify({ ts: Date.now(), data })); inflight.delete(key); return data; },
+    (e) => { inflight.delete(key); throw e; },
+  );
+  inflight.set(key, pr);
+  return pr;
+}
+
+// Load a FotMob page and return props.pageProps from its embedded __NEXT_DATA__.
+async function pageProps(url) {
+  const page = await (await ctx()).newPage();
+  try {
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    const nd = await page.$eval('#__NEXT_DATA__', (e) => e.textContent).catch(() => null);
+    if (!nd) throw new Error(`no __NEXT_DATA__ at ${url}`);
+    return JSON.parse(nd).props.pageProps;
+  } finally {
+    await page.close();
+  }
+}
+
+// --- Search (fast HTTP, no token needed) ---
+export async function suggest(term) {
+  const r = await fetch(
+    `https://apigw.fotmob.com/searchapi/suggest?term=${encodeURIComponent(term)}&lang=en`,
+    { headers: { 'User-Agent': UA } },
+  );
+  const j = await r.json();
+  const parse = (arr) =>
+    (arr?.[0]?.options ?? []).map((o) => {
+      const [name, id] = o.text.split('|');
+      return { id: Number(id), name, ...o.payload };
+    });
+  return { players: parse(j.squadMemberSuggest), teams: parse(j.teamSuggest) };
+}
+
+// --- Player: recent matches + season stats ---
+export function getPlayer(id) {
+  return cached(`player-${id}`, 6 * 3600e3, async () => {
+    const pp = await pageProps(`https://www.fotmob.com/players/${id}/x`);
+    return pp.data; // {name, recentMatches[], mainLeague, statSeasons, ...}
+  });
+}
+
+// --- Match: per-player stat lines for everyone in the match ---
+// matchUrl comes from recentMatches[].matchPageUrl (carries the slug we can't derive from id alone).
+export function getMatch(matchUrl) {
+  const id = (matchUrl.match(/#(\d+)/) || [])[1] || matchUrl;
+  return cached(`m3-${id}`, 0, async () => {
+    const pp = await pageProps('https://www.fotmob.com' + (matchUrl.startsWith('/') ? matchUrl : '/' + matchUrl));
+    const raw = pp.content?.playerStats || {};
+    const players = {};
+    for (const pid of Object.keys(raw)) {
+      const e = raw[pid];
+      players[pid] = { name: e.name, teamId: e.teamId, isGK: e.isGoalkeeper, stats: flatten(e.stats) };
+    }
+    const side = (t) => (t ? { id: t.id, formation: t.formation, starters: (t.starters || []).map((s) => ({ id: s.id, name: s.name, positionId: s.positionId })) } : null);
+    const lu = pp.content?.lineup;
+    return { matchId: id, players, lineup: lu ? { home: side(lu.homeTeam), away: side(lu.awayTeam) } : null };
+    // only cache once the match has real data — never an upcoming match's empty shell
+  }, (d) => Object.keys(d.players).length > 0 || d.lineup?.home?.starters?.length);
+}
+
+// Flatten FotMob's grouped stats into { canonicalKey: number }. Keyed by the stable
+// inner `.key` AND the display title so STAT.resolve can match either.
+function flatten(groups) {
+  const out = {};
+  for (const g of groups || [])
+    for (const [title, obj] of Object.entries(g.stats || {})) {
+      const v = obj?.stat?.value;
+      if (typeof v === 'number') {
+        out[title.toLowerCase()] = v;
+        if (obj.key) out[obj.key.toLowerCase()] = v;
+      }
+    }
+  return out;
+}
+
+// Canonical stat → list of possible FotMob titles/keys (first hit wins).
+export const STAT = {
+  aliases: {
+    shots: ['total shots', 'shots'],
+    sot: ['shots on target', 'shots_on_target', 'shotsontarget'],
+    fouls: ['fouls committed', 'fouls', 'fouls_committed'],
+    fouled: ['was fouled', 'was_fouled'],
+    tackles: ['tackles won', 'tackles', 'tackles_won'],
+    passes: ['accurate passes', 'passes', 'accurate_passes', 'total_passes'],
+    chances: ['chances created', 'chances_created', 'chances_created_op'],
+    saves: ['saves', 'saves_made'],
+    offsides: ['offsides', 'offsides_caught'],
+    rating: ['fotmob rating', 'rating_title'],
+    minutes: ['minutes played', 'minutes_played'],
+  },
+  resolve(flat, canonical) {
+    for (const a of this.aliases[canonical] || [canonical]) {
+      const v = flat[a.toLowerCase()];
+      if (typeof v === 'number') return v;
+    }
+    return undefined;
+  },
+};
+
+// --- Team squad + fixture resolution ---
+const findKey = (o, key, d = 0) => {
+  if (!o || typeof o !== 'object' || d > 10) return null;
+  if (Object.prototype.hasOwnProperty.call(o, key)) return o[key];
+  for (const v of Object.values(o)) { const r = findKey(v, key, d + 1); if (r != null) return r; }
+  return null;
+};
+
+export function getTeam(teamId) {
+  return cached(`team3-${teamId}`, 12 * 3600e3, async () => {
+    const pp = await pageProps(`https://www.fotmob.com/teams/${teamId}/x`);
+    const sq = findKey(pp, 'squad');
+    const groups = Array.isArray(sq) ? sq : sq?.squad || [];
+    const players = [];
+    for (const g of groups) {
+      if ((g.title || '').toLowerCase() === 'coach') continue;
+      for (const m of g.members || g.players || []) if (m?.id) players.push({ id: m.id, name: m.name, position: g.title });
+    }
+    const all = findKey(pp, 'allFixtures')?.fixtures || [];
+    const finished = all
+      .filter((f) => f?.status?.finished && !f.status.cancelled && f.pageUrl)
+      .sort((a, b) => new Date(b.status.utcTime) - new Date(a.status.utcTime)) // genuinely newest-first
+      .map((f) => ({ id: f.id, pageUrl: f.pageUrl, utc: f.status.utcTime }));
+    return { id: teamId, players, finished };
+  });
+}
+
+// Most-frequent starters over the team's last `lookback` finished matches → likely XI.
+export async function likelyXI(teamId, lookback = 6) {
+  const { players, finished } = await getTeam(teamId);
+  const byId = new Map(players.map((p) => [p.id, p]));
+  const starts = new Map();
+  let scanned = 0;
+  for (const fx of finished) {              // newest-first
+    if (scanned >= lookback) break;
+    let md;
+    try { md = await getMatch(fx.pageUrl); } catch { continue; }
+    const lu = md.lineup;
+    const team = lu?.home?.id === teamId ? lu.home : lu?.away?.id === teamId ? lu.away : null;
+    if (!team?.starters?.length) continue;  // skip upcoming / lineup-less matches
+    scanned++;
+    for (const s of team.starters) {
+      const e = starts.get(s.id) || { id: s.id, name: s.name, count: 0 };
+      e.count++; starts.set(s.id, e);
+    }
+  }
+  const isGK = (p) => /keeper|goalkeep/i.test(p.position || '');
+  const ranked = [...starts.values()].sort((a, b) => b.count - a.count)
+    .map((r) => ({ id: r.id, name: r.name, position: byId.get(r.id)?.position || '' }));
+  const xi = [];
+  let gk = 0;
+  for (const p of ranked) {                 // most-frequent first, but at most one keeper (rotation guard)
+    if (isGK(p)) { if (gk) continue; gk++; }
+    xi.push(p);
+    if (xi.length === 11) break;
+  }
+  if (xi.length === 11) return xi;
+  // fallback (too few lineups): pad from the squad — 1 keeper max, then outfielders
+  const have = new Set(xi.map((p) => p.id));
+  const pad = [...(gk ? [] : players.filter(isGK).slice(0, 1)), ...players.filter((p) => !isGK(p))].filter((p) => !have.has(p.id));
+  return [...xi, ...pad].slice(0, 11);
+}
+
+// "Man City" + "Arsenal" → { home:{id,name}, away:{id,name} } via search
+export async function resolveFixture(homeName, awayName) {
+  const pick = async (q) => (await suggest(q)).teams[0] || null;
+  const [home, away] = await Promise.all([pick(homeName), pick(awayName)]);
+  return { home, away };
+}
+
+// --- self-check: run `node src/fotmob.js` ---
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  const assert = (c, m) => { if (!c) throw new Error('FAIL: ' + m); };
+  const s = await suggest('haaland');
+  console.log('suggest:', s.players[0]);
+  assert(s.players[0]?.id, 'suggest returns a player id');
+
+  const p = await getPlayer(s.players[0].id);
+  console.log('player:', p.name, '| recentMatches:', p.recentMatches.length);
+  assert(p.recentMatches.length > 5, 'player has recent matches');
+
+  const played = p.recentMatches.find((m) => m.homeScore != null && !m.onBench);
+  const md = await getMatch(played.matchPageUrl);
+  const me = md.players[p.id];
+  console.log('match', md.matchId, '— available stat keys:\n ', Object.keys(me.stats).join(', '));
+  console.log('resolved → shots:', STAT.resolve(me.stats, 'shots'),
+    '| sot:', STAT.resolve(me.stats, 'sot'),
+    '| fouls:', STAT.resolve(me.stats, 'fouls'),
+    '| tackles:', STAT.resolve(me.stats, 'tackles'),
+    '| passes:', STAT.resolve(me.stats, 'passes'),
+    '| rating:', STAT.resolve(me.stats, 'rating'));
+  assert(me.name, 'player found in match playerStats');
+  await close();
+  console.log('\nOK — fotmob data layer works.');
+}
