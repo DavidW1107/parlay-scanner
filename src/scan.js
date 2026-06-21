@@ -15,10 +15,12 @@ export const LINES = {
   chances: [0.5, 1.5, 2.5],
   saves: [1.5, 2.5, 3.5, 4.5],
   offsides: [0.5, 1.5],
+  headed_sot: [0.5, 1.5],
+  shots_outside_box: [0.5, 1.5],
   goals: [0], assists: [0], card: [0], // anytime markets
 };
 
-const RICH = ['shots', 'sot', 'fouls', 'fouled', 'tackles', 'passes', 'chances', 'saves', 'offsides'];
+const RICH = ['shots', 'sot', 'fouls', 'fouled', 'tackles', 'passes', 'chances', 'saves', 'offsides', 'headed_sot', 'shots_outside_box'];
 
 export async function playerRecords(playerId, lastN = 10) {
   const p = await getPlayer(playerId);

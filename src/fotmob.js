@@ -100,13 +100,20 @@ export function getPlayer(id) {
 // matchUrl comes from recentMatches[].matchPageUrl (carries the slug we can't derive from id alone).
 export function getMatch(matchUrl) {
   const id = (matchUrl.match(/#(\d+)/) || [])[1] || matchUrl;
-  return cached(`m3-${id}`, 0, async () => {
+  return cached(`m4-${id}`, 0, async () => {
     const pp = await pageProps('https://www.fotmob.com' + (matchUrl.startsWith('/') ? matchUrl : '/' + matchUrl));
     const raw = pp.content?.playerStats || {};
     const players = {};
     for (const pid of Object.keys(raw)) {
       const e = raw[pid];
       players[pid] = { name: e.name, teamId: e.teamId, isGK: e.isGoalkeeper, stats: flatten(e.stats) };
+    }
+    // shot-level derived stats bet365 prices but playerStats omits: headed / outside-box on target
+    for (const sh of pp.content?.shotmap?.shots || []) {
+      const p = players[String(sh.playerId)];
+      if (!p || !sh.isOnTarget) continue;
+      if (/head/i.test(sh.shotType || '')) p.stats.headed_sot = (p.stats.headed_sot || 0) + 1;
+      if (sh.isFromInsideBox === false) p.stats.shots_outside_box = (p.stats.shots_outside_box || 0) + 1;
     }
     const side = (t) => (t ? { id: t.id, formation: t.formation, starters: (t.starters || []).map((s) => ({ id: s.id, name: s.name, positionId: s.positionId })) } : null);
     const lu = pp.content?.lineup;
@@ -142,6 +149,8 @@ export const STAT = {
     chances: ['chances created', 'chances_created', 'chances_created_op'],
     saves: ['saves', 'saves_made'],
     offsides: ['offsides', 'offsides_caught'],
+    headed_sot: ['headed_sot'],
+    shots_outside_box: ['shots_outside_box'],
     rating: ['fotmob rating', 'rating_title'],
     minutes: ['minutes played', 'minutes_played'],
   },

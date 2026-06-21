@@ -12,6 +12,8 @@ export const MARKETS = {
   chances:  { label: 'Chances created',   stat: 'chances',  kind: 'ou' },
   saves:    { label: 'Goalkeeper saves',  stat: 'saves',    kind: 'ou' },
   offsides: { label: 'Offsides',          stat: 'offsides', kind: 'ou' },
+  headed_sot:        { label: 'Headed shots on target', stat: 'headed_sot',        kind: 'ou' },
+  shots_outside_box: { label: 'SoT outside box',        stat: 'shots_outside_box', kind: 'ou' },
   goals:    { label: 'Anytime goalscorer',stat: 'goals',    kind: 'atleast', n: 1 },
   assists:  { label: 'Anytime assist',    stat: 'assists',  kind: 'atleast', n: 1 },
   card:     { label: 'To be booked',      stat: 'card',     kind: 'atleast', n: 1 },
@@ -20,6 +22,8 @@ export const MARKETS = {
 // Free-text bet365 market name → catalog key (used by the manual-paste parser).
 export function matchMarket(text) {
   const t = text.toLowerCase();
+  if (/headed/.test(t) && /target/.test(t)) return 'headed_sot';            // before the general SoT/shots rules
+  if (/outside.*box/.test(t) && /target/.test(t)) return 'shots_outside_box';
   if (/shots?\s+on\s+target|on target/.test(t)) return 'sot';
   if (/\bshots?\b/.test(t)) return 'shots';
   if (/fouls?\s+(won|drawn|suffered)|won.*foul/.test(t)) return 'fouled';

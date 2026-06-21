@@ -170,7 +170,7 @@ const isOdds = (t) => /^(\d+\/\d+|\d+\.\d+|EVS|evens)$/i.test(t);
 function toLeg(r) {
   if (!r.odds || !isOdds(r.odds) || r.suspended) return null;
   const g = r.group.toLowerCase(), h = r.colHeader.toLowerCase();
-  if (/headed|outside box|inside box|in the box|1st half|first half|2nd half|second half/.test(g)) return null; // variants not in our catalog
+  if (/inside box|in the box|1st half|first half|2nd half|second half/.test(g)) return null; // variants we don't stat
   if (/score or assist/.test(g)) {
     if (h.startsWith('score') && !h.includes('assist')) return { marketKey: 'goals', line: null };
     if (h === 'assist') return { marketKey: 'assists', line: null };
@@ -178,7 +178,9 @@ function toLeg(r) {
   }
   if (/to score/.test(g)) return h === 'anytime' ? { marketKey: 'goals', line: null } : null; // skip First/Last
   if (/cards|booked/.test(g)) return /booked/.test(h) ? { marketKey: 'card', line: null } : null; // skip 1st Card/Sent Off
-  const stat = /shots on target/.test(g) ? 'sot' : /shots/.test(g) ? 'shots'
+  const stat = (/headed/.test(g) && /target/.test(g)) ? 'headed_sot'
+    : (/outside box/.test(g) && /target/.test(g)) ? 'shots_outside_box'
+    : /shots on target/.test(g) ? 'sot' : /shots/.test(g) ? 'shots'
     : /fouls committed/.test(g) ? 'fouls' : /be fouled|fouled/.test(g) ? 'fouled'
     : /tackles/.test(g) ? 'tackles' : /passes/.test(g) ? 'passes' : /saves/.test(g) ? 'saves' : null;
   if (!stat) return null;
