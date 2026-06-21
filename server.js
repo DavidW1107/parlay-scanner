@@ -50,11 +50,11 @@ const server = createServer(async (req, res) => {
           { matchId: num('matchId'), home: q.get('home') || '', away: q.get('away') || '', homeId: num('homeId'), awayId: num('awayId'), fresh: !!q.get('fresh') },
           Number(q.get('lastN')) || 18);
       } catch (e) { return json(res, 404, { error: String(e?.message || e) }); }
-      let oddsRows = null, captureFixture = null;
+      let oddsRows = null;
       if (q.get('useOdds')) {
-        try { const cap = JSON.parse(await readFile(CAPTURE, 'utf8')); oddsRows = cap.rows; captureFixture = cap.fixture; } catch { /* no capture yet */ }
+        try { oddsRows = JSON.parse(await readFile(CAPTURE, 'utf8')).rows; } catch { /* no capture yet */ }
       }
-      return json(res, 200, recommend(data, oddsRows, captureFixture));
+      return json(res, 200, recommend(data, oddsRows));
     }
 
     const file = STATIC[url.pathname];
