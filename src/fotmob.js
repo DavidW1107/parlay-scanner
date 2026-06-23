@@ -12,16 +12,22 @@ const UA =
 
 let _browser = null;
 let _ctx = null;
+let _ctxPromise = null;
 let _dataPage = null;
 async function ctx() {
   if (_ctx) return _ctx;
-  _browser = await chromium.launch({ headless: true });
-  _ctx = await _browser.newContext({ userAgent: UA, locale: 'en-GB' });
-  return _ctx;
+  // memoize the launch so concurrent first-callers (e.g. likelyXI(home)+likelyXI(away)) don't each
+  // launch a browser — the loser would overwrite _browser and leak the first one.
+  if (!_ctxPromise) _ctxPromise = (async () => {
+    _browser = await chromium.launch({ headless: true });
+    _ctx = await _browser.newContext({ userAgent: UA, locale: 'en-GB' });
+    return _ctx;
+  })();
+  return _ctxPromise;
 }
 export async function close() {
   if (_browser) await _browser.close();
-  _browser = _ctx = _dataPage = null;
+  _browser = _ctx = _ctxPromise = _dataPage = null;
 }
 
 // Call a FotMob JSON API from INSIDE a loaded fotmob page, so its own fetch wrapper adds the
@@ -43,9 +49,9 @@ async function dataFetch(path) {
 // disk cache: ttlMs=0 → never expires (finished matches are immutable).
 // inflight map coalesces concurrent identical fetches (e.g. teammates sharing a match).
 const inflight = new Map();
-function cached(key, ttlMs, fn, keep = () => true) {
+function cached(key, ttlMs, fn, keep = () => true, force = false) {
   const f = `${CACHE_DIR}${key.replace(/[^\w.-]/g, '_')}.json`;
-  if (existsSync(f)) {
+  if (!force && existsSync(f)) {               // force: skip the read (still refetches + rewrites)
     const { ts, data } = JSON.parse(readFileSync(f, 'utf8'));
     if (ttlMs === 0 || Date.now() - ts < ttlMs) return data;
   }
@@ -83,7 +89,9 @@ export async function suggest(term) {
   const parse = (arr) =>
     (arr?.[0]?.options ?? []).map((o) => {
       const [name, id] = o.text.split('|');
-      return { id: Number(id), name, ...o.payload };
+      // id LAST: o.payload carries a string `id` ("8491") that would otherwise clobber the number and
+      // break every `=== teamId` comparison downstream (likelyXI, getTeam form) → wrong XI / swapped goals.
+      return { name, ...o.payload, id: Number(id) };
     });
   return { players: parse(j.squadMemberSuggest), teams: parse(j.teamSuggest) };
 }
@@ -172,7 +180,8 @@ const findKey = (o, key, d = 0) => {
 };
 
 export function getTeam(teamId) {
-  return cached(`team5-${teamId}`, 12 * 3600e3, async () => {
+  teamId = Number(teamId); // ids cross HTTP/JSON as strings — keep the cache key + `=== teamId` numeric
+  return cached(`team6-${teamId}`, 12 * 3600e3, async () => {
     const pp = await pageProps(`https://www.fotmob.com/teams/${teamId}/x`);
     const sq = findKey(pp, 'squad');
     const groups = Array.isArray(sq) ? sq : sq?.squad || [];
@@ -196,12 +205,44 @@ export function getTeam(teamId) {
         return { gf, ga, total: f.home.score + f.away.score, btts: f.home.score > 0 && f.away.score > 0, win: gf > ga, draw: gf === ga, isHome: home };
       });
     const dates = all.filter((f) => f?.status?.utcTime).map((f) => f.status.utcTime); // for congestion checks
-    return { id: teamId, players, finished, form, dates };
+    // every fixture (incl. upcoming) so we can resolve a typed matchup → its matchId → published lineup
+    const fixtures = all.map((f) => ({ id: f.id, pageUrl: f.pageUrl, homeId: f.home?.id, awayId: f.away?.id, utc: f?.status?.utcTime, finished: !!f?.status?.finished }));
+    return { id: teamId, players, finished, form, dates, fixtures };
+  });
+}
+
+// Recent CHANCE profile: shots & shots-on-target, for AND against, per game. Goals-based form is blind
+// to a low block (few goals conceded ≠ few chances conceded); these aggregates are the signal that
+// lets the matchup adjustment see "this side concedes/creates few real openings". Sums every player's
+// shots per side from the cached match pages the scan already loads. Returns null if no shot data.
+export async function teamChances(teamId, lookback = 6) {
+  teamId = Number(teamId);
+  return cached(`tc1-${teamId}-${lookback}`, 12 * 3600e3, async () => {
+    const { finished } = await getTeam(teamId);
+    let n = 0, sf = 0, sa = 0, sotF = 0, sotA = 0;
+    for (const fx of finished) {
+      if (n >= lookback) break;
+      let md;
+      try { md = await getMatch(fx.pageUrl); } catch { continue; }
+      const players = Object.values(md.players || {});
+      if (!players.some((p) => p.teamId === teamId)) continue; // our side must be present (with stats)
+      let mS = 0, oS = 0, mT = 0, oT = 0, any = false;
+      for (const p of players) {
+        const sh = STAT.resolve(p.stats, 'shots'), st = STAT.resolve(p.stats, 'sot');
+        if (sh == null && st == null) continue;
+        any = true;
+        if (p.teamId === teamId) { mS += sh || 0; mT += st || 0; } else { oS += sh || 0; oT += st || 0; }
+      }
+      if (!any) continue;
+      sf += mS; sa += oS; sotF += mT; sotA += oT; n++;
+    }
+    return n ? { n, sf: sf / n, sa: sa / n, sotF: sotF / n, sotA: sotA / n } : null;
   });
 }
 
 // Most-frequent starters over the team's last `lookback` finished matches → likely XI.
 export async function likelyXI(teamId, lookback = 6) {
+  teamId = Number(teamId); // so `lu.home.id === teamId` matches (FotMob ids are numbers)
   const { players, finished } = await getTeam(teamId);
   const byId = new Map(players.map((p) => [p.id, p]));
   const starts = new Map();
@@ -267,7 +308,10 @@ export function listFixtures(dateStr) {
 // --- A specific fixture's lineup, with status (predicted | confirmed | …) ---
 // Short TTL on purpose: a "predicted" XI becomes "confirmed" ~1h before kickoff. Don't cache empty
 // (no lineup released yet) so it re-fetches until one appears.
-export function getFixtureLineup(matchId) {
+// fresh=true forces a live refetch (skips the 8-min cache) — a deliberate "Find value" near kickoff
+// must reflect the latest XI, which can flip from FotMob's predicted to the confirmed lineup minutes
+// before KO. Stats are immutable so they stay cached; only the lineup needs this.
+export function getFixtureLineup(matchId, fresh = false) {
   return cached(`fxlu-${matchId}`, 8 * 60e3, async () => {
     const pp = await pageProps(`https://www.fotmob.com/match/${matchId}`);
     const lu = pp.content?.lineup;
@@ -279,7 +323,7 @@ export function getFixtureLineup(matchId) {
       homeName: g.homeTeam?.name, awayName: g.awayTeam?.name,
       homeId: g.homeTeam?.id, awayId: g.awayTeam?.id,
     };
-  }, (d) => (d.home?.starters?.length || d.away?.starters?.length) ? true : false);
+  }, (d) => (d.home?.starters?.length || d.away?.starters?.length) ? true : false, fresh);
 }
 
 // --- self-check: run `node src/fotmob.js` ---

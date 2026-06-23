@@ -170,10 +170,12 @@ class App:
 
         # primary view: the automated recommendations (always tab 0)
         rf = ttk.Frame(self.nb)
-        self.reco = ttk.Treeview(rf, columns=("prob", "odds", "ret", "ev"), show="tree headings")
+        self.reco = ttk.Treeview(rf, columns=("raw", "wlb", "adj", "odds", "ret", "ev"), show="tree headings")
         self.reco.heading("#0", text="Recommendation")
-        self.reco.column("#0", width=440, anchor="w")
-        for c, h, w in (("prob", "P(win)", 70), ("odds", "Odds", 80), ("ret", "€10 →", 80), ("ev", "EV / edge", 96)):
+        self.reco.column("#0", width=360, anchor="w")
+        # three probabilities side-by-side: Raw observed hit-rate · Wilson-LB (sample-shrunk) · Adj (game-script)
+        for c, h, w in (("raw", "Raw", 52), ("wlb", "Wilson", 58), ("adj", "Adj", 52),
+                        ("odds", "Odds", 74), ("ret", "€10 →", 74), ("ev", "EV / edge", 92)):
             self.reco.heading(c, text=h)
             self.reco.column(c, width=w, anchor="center")
         rsb = ttk.Scrollbar(rf, command=self.reco.yview)
@@ -187,7 +189,8 @@ class App:
         self.nb.add(rf, text="★ Recommendations")
 
         ttk.Label(root, foreground=MUT, padding=(14, 2, 14, 8), wraplength=1140, font=(self.sans, 9),
-                  text="SINGLES (top list) are the edge — exact bet365 odds + return. Double-click any leg for the stats. "
+                  text="Raw = observed hit-rate · Wilson = sample-shrunk (conservative) · Adj = adjusted for this fixture (game-script). "
+                       "SINGLES (top list) are the edge — exact bet365 odds + return. Double-click any leg for the stats. "
                        "VALUE = best +EV 2–4 leg combos; BIG RETURN = 3–4 legs for a bigger payout (capped at bet365's 1000/1). "
                        "Parlay returns are estimates — same-match correlation makes bet365's real price lower. Bet responsibly.").pack(fill="x")
 
@@ -412,10 +415,47 @@ class App:
         base = l["market"] if l["kind"] == "atleast" else f"{l['market']} o{l['line']}"
         return f"{l['player']} — {base}"
 
+    @staticmethod
+    def _pct(v):
+        return f"{round(v * 100)}%" if v is not None else "—"
+
     def _leg_vals(self, l, od):
         ev = f"{l['edge'] * 100:+.1f}pp" if od and l.get("edge") is not None else ""
         ret = f"€{10 * l['odds']:.0f}" if l.get("odds") else ""
-        return (f"{round(l['p'] * 100)}%", f"{l['odds']:.2f}" if l.get("odds") else "—", ret, ev)
+        # Raw (observed) · Wilson-LB (sample-shrunk) · Adj (game-script)
+        return (self._pct(l.get("season")), self._pct(l.get("pRaw")), self._pct(l.get("p")),
+                f"{l['odds']:.2f}" if l.get("odds") else "—", ret, ev)
+
+    @staticmethod
+    def _parlay_summary(p):
+        # compact one-line "Kane Anytime + Rice Tackles o2.5 + England Match" so the headline rows are
+        # readable without expanding — surname for players, full label for team markets.
+        parts = []
+        for l in p["legs"]:
+            who = l["player"] if l.get("isTeam") else l["player"].split(" ")[-1]
+            mk = l["market"].split(" ")[0]
+            tail = "" if l["kind"] == "atleast" else f" o{l['line']}"
+            parts.append(f"{who} {mk}{tail}")
+        return "  +  ".join(parts)
+
+    def _put_parlay(self, parent, p, od, indent):
+        so = p.get("shownOdds")
+        if so:
+            odds = (f"{so:.2f}" if so < 100 else f"{so:.0f}") + (" cap" if p.get("capped") else "")
+        else:
+            odds = f"{p['fairOdds']:.1f} fair"
+        ret = f"~€{p['ret10']:.0f}" if p.get("ret10") else "—"   # ~ = independent estimate; bet365 quotes less
+        ev = f"{p['ev']:+.2f}" if p.get("ev") is not None else ""
+        tag = "pos" if (p.get("ev") or 0) > 0 else ""
+        sp = "   " * indent
+        # combined prob at each stage: Raw · Wilson · Adj (products of the legs' three probabilities)
+        par = self.reco.insert(parent, "end", text=sp + self._parlay_summary(p),
+                               values=(self._pct(p.get("probRaw")), self._pct(p.get("probWilson")),
+                                       self._pct(p.get("prob")), odds, ret, ev), tags=(tag,))
+        for l in p["legs"]:                       # legs as children → double-click drill-down
+            iid = self.reco.insert(par, "end", text=sp + "   • " + self._leg_label(l), values=self._leg_vals(l, od))
+            self._reco_leg[iid] = l
+        return par
 
     def _render_recos(self, rec):
         if "error" in rec:
@@ -430,8 +470,9 @@ class App:
         badge = {
             "confirmed": ("✓ CONFIRMED LINEUP — these players are starting", "pos"),
             "predicted": ("◑ PREDICTED XI — not confirmed yet; re-run Find value near kickoff", "hdr"),
+            "standard": ("◑ FotMob XI — likely starters; re-run Find value near kickoff to confirm", "hdr"),
             "heuristic": ("⚠ ESTIMATED from recent starters — no lineup released, players may not start", "neg"),
-        }.get(status, (f"lineup: {status}", "hdr"))
+        }.get(status, ("◑ FotMob XI — likely starters; re-run near kickoff to confirm", "hdr"))
         t.insert("", "end", text=badge[0], tags=(badge[1],))
         rot = rec.get("rotationNote")
         if rot:
@@ -454,22 +495,15 @@ class App:
         else:
             order.append(("LIKELY  ·  most probable combos — Capture bet365 for edge", "likely"))
         for title, key in order:
-            tiers = rec["tiers"].get(key, [])
-            hh = t.insert("", "end", text=f"{title}   ({len(tiers)})", tags=("hdr",))
-            for p in tiers:
-                so = p.get("shownOdds")
-                if so:
-                    odds = (f"{so:.2f}" if so < 100 else f"{so:.0f}") + (" cap" if p.get("capped") else "")
-                else:
-                    odds = f"{p['fairOdds']:.1f} fair"
-                ret = f"~€{p['ret10']:.0f}" if p.get("ret10") else "—"   # ~ = independent estimate; bet365 quotes less
-                ev = f"{p['ev']:+.2f}" if p.get("ev") is not None else ""
-                tag = "pos" if (p.get("ev") or 0) > 0 else ""
-                par = t.insert(hh, "end", text=f"   {p['size']}-leg parlay",
-                               values=(f"{round(p['prob'] * 100)}%", odds, ret, ev), tags=(tag,))
-                for l in p["legs"]:
-                    iid = t.insert(par, "end", text="        " + self._leg_label(l), values=self._leg_vals(l, od))
-                    self._reco_leg[iid] = l
+            fams = rec["tiers"].get(key, [])
+            hh = t.insert("", "end", text=f"{title}   ({len(fams)} distinct)", tags=("hdr",), open=True)
+            for fam in fams:                      # each fam = a headline parlay + its near-duplicate variations
+                par = self._put_parlay(hh, fam, od, indent=1)
+                vrs = fam.get("variants") or []
+                if vrs:
+                    g = t.insert(par, "end", text=f"      ▸ {len(vrs)} variation(s) — one leg swapped", tags=("hdr",))
+                    for v in vrs:
+                        self._put_parlay(g, v, od, indent=3)
 
         m = rec["meta"]
         tail = "odds merged ✓" if od else "Capture bet365 to add odds + returns"
