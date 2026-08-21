@@ -21,10 +21,14 @@ const OUT = `${DIR}/_b365_capture.json`;
 const CDP_PROFILE = `${DIR}/.b365cdp`;   // dedicated browser profile — log in here once, it persists
 const PORT = 9333;                       // dedicated — the RSA test-watcher already owns 9222
 const WAIT_MIN = 20; // generous: first-time bet365 login (2FA), navigate, find the markets, click
-const BROWSERS = [   // a real browser binary — Edge is always present on Win11
+const BROWSERS = [   // first real browser binary that exists wins — Win / Linux / macOS
   'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
   'C:/Program Files/Google/Chrome/Application/chrome.exe',
   'C:/Program Files (x86)/Google/Chrome/Application/chrome.exe',
+  '/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/microsoft-edge',
+  '/usr/bin/chromium', '/usr/bin/chromium-browser', '/snap/bin/chromium',
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
 ];
 
 rmSync(OUT, { force: true }); // clear stale capture so the app never reads an old run

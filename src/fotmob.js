@@ -181,7 +181,7 @@ const findKey = (o, key, d = 0) => {
 
 export function getTeam(teamId) {
   teamId = Number(teamId); // ids cross HTTP/JSON as strings — keep the cache key + `=== teamId` numeric
-  return cached(`team6-${teamId}`, 12 * 3600e3, async () => {
+  return cached(`team7-${teamId}`, 12 * 3600e3, async () => {
     const pp = await pageProps(`https://www.fotmob.com/teams/${teamId}/x`);
     const sq = findKey(pp, 'squad');
     const groups = Array.isArray(sq) ? sq : sq?.squad || [];
@@ -194,7 +194,10 @@ export function getTeam(teamId) {
     const fin = all
       .filter((f) => f?.status?.finished && !f.status.cancelled)
       .sort((a, b) => new Date(b.status.utcTime) - new Date(a.status.utcTime)); // newest-first
-    const finished = fin.filter((f) => f.pageUrl).map((f) => ({ id: f.id, pageUrl: f.pageUrl, utc: f.status.utcTime }));
+    const finished = fin.filter((f) => f.pageUrl).map((f) => ({
+      id: f.id, pageUrl: f.pageUrl, utc: f.status.utcTime,
+      league: f.tournament?.name || f.leagueName || '', // so likelyXI can skip friendlies
+    }));
     // team form (for team markets): goals/result/btts straight off each fixture's home/away score
     const form = fin
       .filter((f) => typeof f.home?.score === 'number' && typeof f.away?.score === 'number')
@@ -247,7 +250,13 @@ export async function likelyXI(teamId, lookback = 6) {
   const byId = new Map(players.map((p) => [p.id, p]));
   const starts = new Map();
   let scanned = 0;
-  for (const fx of finished) {              // newest-first
+  // Preseason friendlies rotate wholesale (keeper splits, trialists, kids) and poison the frequency
+  // count — competitive matches only. Friendlies are the fallback ONLY when zero competitive
+  // lineups exist yet (true preseason).
+  const isFriendly = (fx) => /friendl/i.test(fx.league || '');
+  let sample = finished.filter((f) => !isFriendly(f));
+  if (!sample.length) sample = finished;
+  for (const fx of sample) {                // newest-first
     if (scanned >= lookback) break;
     let md;
     try { md = await getMatch(fx.pageUrl); } catch { continue; }

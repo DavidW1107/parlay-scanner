@@ -492,6 +492,7 @@ class App:
         if od:
             order.append(("VALUE  ·  best +EV (2–4 legs)", "value"))
             order.append(("BIG RETURN  ·  3–4 legs, biggest payout", "bigReturn"))
+            order.append(("LONGSHOT  ·  5–7 legs, maximum payout", "longshot"))
         else:
             order.append(("LIKELY  ·  most probable combos — Capture bet365 for edge", "likely"))
         for title, key in order:

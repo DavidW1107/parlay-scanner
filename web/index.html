@@ -6,7 +6,7 @@
 <title>Parlay Scanner</title>
 <style>
   :root {
-    --bg: #0a0908; --panel: #14110f; --line: #262019; --ink: #ece6d8; --mut: #8d8676;
+    --bg: #0a0908; --panel: #14110f; --panel2: #1d1813; --line: #262019; --ink: #ece6d8; --mut: #8d8676;
     --gold: #c9a24b; --green: #56b06f; --red: #cd5a4b; --r: 9px;
   }
   * { box-sizing: border-box; }
@@ -17,39 +17,105 @@
   header h1 { margin: 0; font-size: 19px; letter-spacing: -.01em; }
   header .tag { color: var(--gold); font-size: 11px; letter-spacing: .18em; text-transform: uppercase; }
   main { padding: 22px 28px; max-width: 1500px; margin: 0 auto; }
-  .bar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 20px; }
+  .bar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 18px; }
   input, button { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line);
     border-radius: var(--r); padding: 9px 12px; }
   input::placeholder { color: var(--mut); }
   button { background: var(--gold); color: #1a1408; border: 0; font-weight: 600; cursor: pointer; }
   button:hover { filter: brightness(1.08); }
-  .bar input.team { width: 200px; } .bar input.n { width: 64px; }
+  button.btn2 { background: var(--panel2); color: var(--ink); border: 1px solid var(--line); font-weight: 500; }
+  button.btn2:hover { border-color: var(--gold); filter: none; }
+  .bar input.team { width: 190px; } .bar input.n { width: 60px; text-align: center; }
+  #status { margin-left: 4px; }
+
+  /* recommendations */
+  #reco:empty { display: none; }
+  #reco { margin-bottom: 22px; }
+  .badge { padding: 8px 12px; border: 1px solid var(--line); border-left-width: 3px; border-radius: 6px;
+    margin-bottom: 8px; font-size: 13px; background: var(--panel); }
+  .badge.pos { border-left-color: var(--green); } .badge.neg { border-left-color: var(--red); color: #e79a8e; }
+  .badge.gold { border-left-color: var(--gold); }
+  .tier-head { color: var(--gold); font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+    margin: 20px 0 8px; }
+  .tier { margin-top: 6px; }
+  .parlay { background: var(--panel); border: 1px solid var(--line); border-radius: 7px; margin-bottom: 6px; }
+  .parlay > summary { list-style: none; cursor: pointer; padding: 9px 13px; display: flex; gap: 12px;
+    align-items: baseline; justify-content: space-between; }
+  .parlay > summary::-webkit-details-marker { display: none; }
+  .parlay > summary::before { content: "▸"; color: var(--mut); margin-right: 2px; }
+  .parlay[open] > summary::before { content: "▾"; }
+  .psum { flex: 1; min-width: 0; }
+  .pcols { display: inline-flex; gap: 12px; white-space: nowrap; align-items: baseline; }
+  .pp { color: var(--ink); } .po { color: var(--gold); } .pr { color: var(--mut); }
+  .plegs { padding: 4px 13px 11px 26px; border-top: 1px solid var(--line); }
+  .leg { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; cursor: pointer; border-radius: 4px; }
+  .leg:hover { color: var(--gold); }
+  .leg .lname[data-pid], .leg[data-pid] .lname { }
+  .lcols { color: var(--mut); white-space: nowrap; }
+  details.variants { margin: 6px 0 2px; }
+  details.variants > summary { cursor: pointer; color: var(--mut); font-size: 12px; padding: 4px 0; }
+  details.variants .parlay { background: var(--panel2); }
+
+  table.rtab { width: 100%; border-collapse: collapse; margin-top: 4px; }
+  .rtab th, .rtab td { text-align: right; padding: 6px 9px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  .rtab th { color: var(--mut); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; font-weight: 500; }
+  .rtab td.l, .rtab th.l { text-align: left; }
+  tr.legrow { cursor: pointer; } tr.legrow:hover td { background: var(--panel); }
+  .smp { color: var(--mut); font-size: 11px; }
+  .pos { color: var(--green); font-weight: 600; } .neg { color: var(--red); }
+
+  /* squads + deep-dive cards */
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  .squad:empty { display: none; }
   .squad { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 14px 16px; }
   .squad h2 { margin: 0 0 10px; font-size: 14px; color: var(--gold); }
-  .squad .pos { color: var(--mut); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; margin: 10px 0 4px; }
+  .squad .pos { color: var(--mut); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; margin: 10px 0 4px; font-weight: 500; }
   .player { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; margin: 3px 4px 0 0;
     border: 1px solid var(--line); border-radius: 999px; cursor: pointer; font-size: 13px; }
   .player:hover { border-color: var(--gold); }
-  .player.active { background: var(--gold); color: #1a1408; border-color: var(--gold); }
   .player.xi { border-color: var(--gold); color: var(--ink); }
   #detail { margin-top: 22px; }
   .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 18px 20px; }
   #detail .card + .card { margin-top: 16px; }
   .card h2 { margin: 0 0 4px; font-size: 17px; }
   .card .sub { color: var(--mut); font-size: 12px; margin-bottom: 14px; }
-  table { width: 100%; border-collapse: collapse; }
-  th, td { text-align: right; padding: 7px 9px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-  th { color: var(--mut); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; font-weight: 500; }
-  td.l, th.l { text-align: left; }
+  .card table { width: 100%; border-collapse: collapse; }
+  .card th, .card td { text-align: right; padding: 7px 9px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  .card th { color: var(--mut); font-size: 10px; letter-spacing: .1em; text-transform: uppercase; font-weight: 500; }
+  .card td.l, .card th.l { text-align: left; }
+  .hr { color: var(--ink); } .hr.lo { color: var(--mut); }
   tr.mkt-head td { color: var(--gold); font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
     border-bottom: 0; padding-top: 16px; }
-  .hr { color: var(--ink); } .hr.lo { color: var(--mut); }
-  .smp { color: var(--mut); font-size: 11px; }
   input.odds { width: 74px; padding: 5px 8px; text-align: right; }
   .edge.pos { color: var(--green); font-weight: 600; } .edge.neg { color: var(--red); }
   .muted { color: var(--mut); } .err { color: var(--red); }
-  .legend { color: var(--mut); font-size: 12px; margin-top: 10px; }
+  .sm { font-size: 12px; }
+  .legend { color: var(--mut); font-size: 12px; margin-top: 18px; line-height: 1.6; }
+
+  /* modal (fixtures picker + leg drill-down) */
+  .backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: flex; align-items: flex-start;
+    justify-content: center; padding: 48px 16px; overflow: auto; z-index: 100; }
+  .modal { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px;
+    width: 100%; max-width: 620px; box-shadow: 0 18px 60px rgba(0,0,0,.55); }
+  .mhead { margin: 0 0 12px; font-size: 16px; }
+  .mclose { margin-top: 14px; background: var(--panel2); color: var(--ink); border: 1px solid var(--line); font-weight: 500; }
+  .fx-date { color: var(--gold); font-size: 12px; letter-spacing: .06em; margin: 14px 0 4px; }
+  .fx { display: flex; align-items: baseline; gap: 8px; padding: 8px 10px; border-radius: 6px; cursor: pointer; }
+  .fx:hover { background: var(--panel2); }
+  .fx-ko { color: var(--gold); } .fx-lg { color: var(--mut); font-size: 11px; margin-left: auto; }
+  .lswin { display: grid; grid-template-columns: repeat(2, auto); gap: 2px 26px; justify-content: start;
+    margin-bottom: 8px; font-size: 13px; }
+  .lswin > :first-child, .lswin .pad { grid-column: 1 / -1; }
+  .lswin .pad { margin-top: 8px; }
+
+  /* XI editor */
+  .badge-btn { float: right; padding: 3px 10px; font-size: 12px; margin: -2px 0; }
+  .xi-side { margin-top: 14px; }
+  .xi-side h2 { margin: 0 0 4px; font-size: 14px; color: var(--gold); }
+  .xi-cnt { font-size: 12px; color: var(--mut); margin-left: 8px; }
+  .xi-cnt.err { color: var(--red); }
+  .xi-side .pos { color: var(--mut); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; margin: 10px 0 4px; }
+  #xiApply { margin-top: 16px; }
 </style>
 </head>
 <body>
@@ -59,18 +125,26 @@
   </header>
   <main>
     <div class="bar">
-      <input class="team" id="home" placeholder="Home team (e.g. Man City)" />
-      <input class="team" id="away" placeholder="Away team (e.g. Arsenal)" />
-      <input class="n mono" id="lastN" value="10" title="last N games" />
-      <button id="scan">Scan fixture</button>
+      <input class="team" id="home" value="Man City" placeholder="Home team" />
+      <input class="team" id="away" value="Arsenal" placeholder="Away team" />
+      <input class="n mono" id="lastN" value="18" title="last N games" />
+      <button id="btnFx" class="btn2">📅 Fixtures</button>
+      <button id="btnVal">★ Find value</button>
+      <button id="btnScan" class="btn2">Scan squads</button>
+      <button id="btnCap" class="btn2">Capture bet365</button>
       <span id="status" class="muted"></span>
     </div>
+    <div id="reco"></div>
     <div class="grid2">
       <div class="squad" id="homeSquad"></div>
       <div class="squad" id="awaySquad"></div>
     </div>
     <div id="detail"></div>
-    <p class="legend">Hit-rate = share of last-N games the player beat the line (≥60 min only). Type the bet365 price (decimal <b>1.83</b> or fractional <b>5/6</b>); edge = hit-rate − implied. Positive edge = value.</p>
+    <p class="legend"><b>★ Find value</b> scans every likely starter × market and ranks singles + parlays.
+      Raw = observed hit-rate · Wilson = sample-shrunk (conservative) · Adj = adjusted for this fixture. Click any
+      leg for its game log. <b>✎ Adjust starters</b> lets you override the XI — legs re-rank around your picks.
+      <b>Capture bet365</b> merges live odds → VALUE (best +EV 2–4 legs), BIG RETURN (3–4 legs) and LONGSHOT (5–7 legs) tiers.
+      Parlay returns are estimates — same-match correlation makes bet365's real price lower. 18+, bet responsibly.</p>
   </main>
   <script src="/app.js"></script>
 </body>

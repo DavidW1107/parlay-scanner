@@ -106,7 +106,10 @@ async function findFixtureId(homeId, awayId) {
 // the released XI is used either way. Only when no lineup exists yet do we fall back to the
 // recent-starter heuristic. lineupStatus tells the UI how much to trust it.
 export async function legsForFixture(spec, lastN = 18) {
-  const key = `${spec.matchId || `${spec.home}|${spec.away}`}|${lastN}`.toLowerCase();
+  // spec.homeXI / spec.awayXI: player-id arrays — the user's own starting XI (overrides any lineup)
+  const custom = spec.homeXI?.length && spec.awayXI?.length;
+  const cxi = custom ? `|cxi:${spec.homeXI.join('.')}~${spec.awayXI.join('.')}` : '';
+  const key = `${spec.matchId || `${spec.home}|${spec.away}`}|${lastN}${cxi}`.toLowerCase();
   if (!spec.fresh && memo.has(key)) return memo.get(key); // fresh=1 re-fetches (e.g. lineup just confirmed)
 
   let homeName = spec.home, awayName = spec.away, homeXI, awayXI, lineupStatus = 'heuristic';
@@ -122,7 +125,16 @@ export async function legsForFixture(spec, lastN = 18) {
   // typed entry (no matchId) → find the actual fixture so we use its real released lineup
   if (!matchId && hId && aId) matchId = await findFixtureId(hId, aId).catch(() => null);
 
-  if (matchId) {
+  // user-adjusted XI beats any published/predicted lineup — they're overriding the team news call
+  if (custom && hId && aId) {
+    const [ht, at] = await Promise.all([getTeam(hId), getTeam(aId)]);
+    const pick = (t, ids) => ids.map((id) => t.players.find((p) => p.id === Number(id))).filter(Boolean)
+      .map((p) => ({ id: p.id, name: p.name, position: p.position }));
+    const hx = pick(ht, spec.homeXI), ax = pick(at, spec.awayXI);
+    if (hx.length && ax.length) { homeXI = hx; awayXI = ax; lineupStatus = 'custom'; }
+  }
+
+  if (!homeXI && matchId) {
     let lu = null;
     try { lu = await getFixtureLineup(matchId, spec.fresh); } catch { /* no lineup released / fetch failed */ }
     if (lu?.home?.starters?.length && lu?.away?.starters?.length) {
@@ -207,7 +219,12 @@ export async function legsForFixture(spec, lastN = 18) {
     if (flags.length) rotationNote = 'rotation risk — ' + flags.join('; ');
   }
 
-  const out = { fixture: `${homeName} v ${awayName}`, home: homeName, away: awayName, lineupStatus, rotationNote, legs };
+  const slimXI = (xi) => xi.map((p) => ({ id: p.id, name: p.name }));
+  const out = {
+    fixture: `${homeName} v ${awayName}`, home: homeName, away: awayName, homeId: hId, awayId: aId,
+    xi: { home: slimXI(homeXI), away: slimXI(awayXI) }, // the XI actually used — feeds the UI's editor
+    lineupStatus, rotationNote, legs,
+  };
   memo.set(key, out);
   return out;
 }
@@ -353,7 +370,8 @@ export function recommend(data, oddsRows) {
   // Captured odds only "count" if they actually matched players in THIS fixture. A capture for a
   // different match merges nothing → fall back to confidence ranking and warn, don't show blanks.
   const haveOdds = rawHaveOdds && matched > 0;
-  const { parlays, poolSize } = buildParlays(legs, { haveOdds });
+  // pre-odds only the ≤3-leg "likely" tier renders — don't build 100k+ big combos nobody sees
+  const { parlays, poolSize } = buildParlays(legs, { haveOdds, maxSize: haveOdds ? 7 : 3 });
 
   const byProb = [...parlays].sort((a, b) => b.prob - a.prob);
   // Headline is SINGLES (topLegs). With odds: VALUE = best +EV 2–4 leg combos (the edge); BIG RETURN
@@ -368,6 +386,9 @@ export function recommend(data, oddsRows) {
       .sort((a, b) => b.ev - a.ev), 12),
     bigReturn: clusterTier(parlays.filter((p) => p.legs.length >= 3 && p.legs.length <= 4 && p.prob >= 0.02)
       .sort((a, b) => (Math.min(b.odds || 0, PAYOUT_CAP) - Math.min(a.odds || 0, PAYOUT_CAP)) || b.prob - a.prob), 10),
+    // monster multis: 5–7 legs, floor 0.5% — payout hunting, most will lose (and the cap bites)
+    longshot: clusterTier(parlays.filter((p) => p.legs.length >= 5 && p.prob >= 0.005)
+      .sort((a, b) => (Math.min(b.odds || 0, PAYOUT_CAP) - Math.min(a.odds || 0, PAYOUT_CAP)) || b.prob - a.prob), 10),
   } : {
     likely: clusterTier(byProb.filter((p) => p.legs.length >= 2 && p.legs.length <= 3), 10),
   };
@@ -378,6 +399,7 @@ export function recommend(data, oddsRows) {
 
   return {
     fixture: data.fixture, home: data.home, away: data.away, haveOdds,
+    homeId: data.homeId, awayId: data.awayId, xi: data.xi,
     lineupStatus: data.lineupStatus, rotationNote: data.rotationNote,
     topLegs, tiers,
     meta: {
@@ -428,6 +450,11 @@ if (process.argv[1] === (await import('url')).fileURLToPath(import.meta.url)) {
     assert(gameFactor('sot', ghana, 0.8) < gameFactor('sot', ghana, 0), 'low block tempers the favourite\'s attack vs no-dominance');
     assert(gameFactor('shots', ghana, 0.8) < gameFactor('shots', ghana, 0), 'temper-ALL: even shot volume is pulled down');
     assert(controlOf([{ gf: 2.2, ga: 0.7 }], null, [{ gf: 0.8, ga: 1.6 }], null) > 0.3, 'stronger side has clearly positive control');
+
+    // longshot tier feed: maxSize 7 must actually produce 5–7 leg parlays from a priced pool
+    const seven = 'ABCDEFG'.split('').map((c, i) => ({ id: c, sample: 10, p: 0.6, odds: 1.9 + i * 0.1, player: c, market: 'Shots' }));
+    const sizes = new Set(buildParlays(seven, { haveOdds: true, maxSize: 7 }).parlays.map((p) => p.legs.length));
+    assert(sizes.has(5) && sizes.has(6) && sizes.has(7), `maxSize 7 builds 5/6/7-leg combos, got sizes ${[...sizes]}`);
     console.log('OK — clusterParlays + team Result priced-in + game-script (favourite attack tempered, saves/fouls collapse, underdog spikes).');
     process.exit(0);
   }
