@@ -121,7 +121,10 @@ if (!target) {
 // or the betslip), then scroll the page and accumulate every odds cell across scroll positions.
 // Each gl-MarketGroup has a title (the market), a sticky player column (.bbl-…ParticipantLabel_Name),
 // and odds columns (.gl-Market of .bbl-BetBuilderParticipant cells) row-aligned to the names.
-const raw = await target.evaluate(async () => {
+// bet365 sometimes renders the whole app inside an IFRAME (route-dependent) — the top document is
+// an empty shell and a main-frame read returns 0 cells. So the scrape runs in EVERY frame and the
+// one that yields the most odds cells wins.
+const SCRAPE = async () => {
   const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const showMore = () => {
@@ -165,7 +168,14 @@ const raw = await target.evaluate(async () => {
   for (let y = 0; y <= se.scrollHeight + 600; y += 600) { se.scrollTop = y; await sleep(150); read(); }
   se.scrollTop = 0;
   return [...acc.values()];
-});
+};
+
+let raw = [], scrapedFrames = 0;
+for (const fr of target.frames()) {
+  const cells = await fr.evaluate(SCRAPE).catch(() => []);
+  scrapedFrames++;
+  if (cells.length > raw.length) raw = cells;   // the frame holding the Bet Builder wins
+}
 
 const isOdds = (t) => /^(\d+\/\d+|\d+\.\d+|EVS|evens)$/i.test(t);
 
@@ -222,9 +232,13 @@ for (const r of raw) {
   byMarket[leg.marketKey] = (byMarket[leg.marketKey] || 0) + 1;
 }
 
-const fixture = (await target.innerText('body').catch(() => '')).split('\n').map((s) => s.trim())
-  .filter(Boolean).find((s) => / v /.test(s)) || '';
+let fixture = '';
+for (const fr of target.frames()) {   // fixture header lives in whichever frame has the content
+  const txt = await fr.evaluate(() => document.body?.innerText || '').catch(() => '');
+  fixture = txt.split('\n').map((s) => s.trim()).filter(Boolean).find((s) => / v /.test(s)) || '';
+  if (fixture) break;
+}
 const groupsSeen = [...new Set(raw.map((r) => r.group))];
-writeFileSync(OUT, JSON.stringify({ ok: true, url: target.url(), fixture, rows, _debug: { groupsSeen, byMarket, rawCells: raw.length } }, null, 1));
+writeFileSync(OUT, JSON.stringify({ ok: true, url: target.url(), fixture, rows, _debug: { groupsSeen, byMarket, rawCells: raw.length, scrapedFrames } }, null, 1));
 console.log(`CAPTURED ${rows.length} prices for ${fixture} → ${JSON.stringify(byMarket)}`);
 await browser.close();   // disconnects CDP; your browser stays open

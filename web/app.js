@@ -393,6 +393,7 @@ async function captureBet365() {
   try {
     const data = await (await fetch('/api/capture', { method: 'POST' })).json();
     if (!data.ok) return setStatus(`bet365 capture: ${data.reason || 'failed'}`, true);
+    if (!data.rows.length) return setStatus('capture read 0 prices — open the fixture\'s Bet Builder / Player Markets tab, wait for odds to render, then click CAPTURE', true);
     setStatus(`bet365: captured ${data.rows.length} prices — re-ranking parlays with odds…`);
     USE_ODDS = true; // XI edits after this keep the merged odds
     renderRecos(await recommend({ useOdds: true }));
