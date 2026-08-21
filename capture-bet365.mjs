@@ -140,7 +140,53 @@ const SCRAPE = async () => {
   await sleep(400); showMore(); await sleep(500);
 
   const acc = new Map();   // keyed so re-reads across scroll positions de-dup
-  const read = () => {
+  const isOddsTxt = (t) => /^(\d+\/\d+|\d+\.\d+|EVS|evens)$/i.test(t);
+
+  // 2026 markup: class names are build-hashed (brp-f2e5d7…) — only the layout suffix
+  // "…Market-pwidthNN" survives, so read by STRUCTURE, not names. A market group = the parent of
+  // 2+ pwidth columns; each column = 1 header cell + N row cells; the column whose rows are mostly
+  // NON-odds text is the participant/name column, rows align 1:1 across columns (empty cell =
+  // suspended, index keeps alignment). The legacy bbl- reader is kept below feeding the same
+  // accumulator, so whichever markup the page has wins.
+  const readNew = () => {
+    const byGroup = new Map();
+    for (const c of document.querySelectorAll('[class*=Market-pwidth]')) {
+      const g = c.parentElement;
+      if (!byGroup.has(g)) byGroup.set(g, []);
+      byGroup.get(g).push(c);
+    }
+    for (const [g, gcols] of byGroup) {
+      if (gcols.length < 2) continue;                       // a group needs names + ≥1 odds column
+      const parsed = gcols.map((c) => [...c.children].map((k) => norm(k.innerText)));
+      let nameIdx = -1, best = -1;
+      parsed.forEach((rows, i) => {
+        const score = rows.slice(1).filter((t) => t && !isOddsTxt(t)).length;
+        if (score > best) { best = score; nameIdx = i; }
+      });
+      if (nameIdx < 0 || best < 1) continue;
+      const names = parsed[nameIdx].slice(1).map((t) => t.replace(/^\d+\s+/, '')); // strip shirt number
+      // group title: first short text block above us — walk previous siblings up the ancestor chain
+      let title = '';
+      for (let a = g; a && !title && a !== document.body; a = a.parentElement)
+        for (let s = a.previousElementSibling; s && !title; s = s.previousElementSibling) {
+          const t = norm(s.innerText).split('\n')[0];
+          if (t && t.length < 48 && !isOddsTxt(t)) title = t;
+        }
+      title = title.replace(/Sub On Play On.*$/i, '').replace(/Bet Boost.*$/i, '').trim();
+      parsed.forEach((rows, i) => {
+        if (i === nameIdx) return;
+        const colHeader = rows[0];
+        const colIndex = i - (i > nameIdx ? 1 : 0);          // odds columns numbered 0.. skipping names col
+        rows.slice(1).forEach((t, ri) => {
+          const player = names[ri];
+          if (!player || !isOddsTxt(t)) return;              // empty/suspended cell → skip, index holds
+          acc.set(`${title}|${colHeader}|${colIndex}|${player}`, { group: title, colHeader, colIndex, player, odds: t, suspended: false });
+        });
+      });
+    }
+  };
+  // legacy bbl- Bet Builder markup — harmless no-op when the classes are gone
+  const readLegacy = () => {
     const groups = [...document.querySelectorAll('.gl-MarketGroup')].filter((g) => g.querySelector('.bbl-BetBuilderParticipant_Odds'));
     const tops = groups.filter((g) => !groups.some((o) => o !== g && o.contains(g)));
     for (const g of tops) {
@@ -164,6 +210,7 @@ const SCRAPE = async () => {
       });
     }
   };
+  const read = () => { readNew(); readLegacy(); };
   const se = document.scrollingElement;
   for (let y = 0; y <= se.scrollHeight + 600; y += 600) { se.scrollTop = y; await sleep(150); read(); }
   se.scrollTop = 0;
@@ -206,7 +253,7 @@ function toLeg(r) {
     if (h === 'assist') return { marketKey: 'assists', line: null };
     return null; // "Score or Assist" combined — no clean single-market mapping
   }
-  if (/to score/.test(g)) return h === 'anytime' ? { marketKey: 'goals', line: null } : null; // skip First/Last
+  if (/to score|goalscorer/.test(g)) return h === 'anytime' ? { marketKey: 'goals', line: null } : null; // skip First/Last
   if (/cards|booked/.test(g)) return /booked/.test(h) ? { marketKey: 'card', line: null } : null; // skip 1st Card/Sent Off
   const stat = (/headed/.test(g) && /target/.test(g)) ? 'headed_sot'
     : (/outside box/.test(g) && /target/.test(g)) ? 'shots_outside_box'
