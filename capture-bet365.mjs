@@ -148,7 +148,7 @@ const SCRAPE = async () => {
   // NON-odds text is the participant/name column, rows align 1:1 across columns (empty cell =
   // suspended, index keeps alignment). The legacy bbl- reader is kept below feeding the same
   // accumulator, so whichever markup the page has wins.
-  const readNew = () => {
+  const readNew = (tag = '') => {
     const cols = [...document.querySelectorAll('[class*=Market-pwidth]')];
     if (!cols.length) return;
     // classify every column: a NAMES column is mostly non-odds text, an ODDS column mostly prices
@@ -195,6 +195,9 @@ const SCRAPE = async () => {
           if (MARKETY.test(t)) title = t;
         }
       title = (title || first).replace(/Sub On Play On.*$/i, '').replace(/Bet Boost.*$/i, '').trim();
+      // tab-walk pass: suffix the active tab so different panes of one widget can't share keys
+      // (toLeg matches by substring, so "Shots on Target Arsenal" still maps)
+      if (tag && !title.toLowerCase().includes(tag.toLowerCase())) title = `${title} ${tag}`;
       oddsCols.forEach((i, ci) => {
         const colHeader = hasHeader ? i.rows[0] : '';
         body(i.rows).forEach((t, ri) => {
@@ -230,7 +233,7 @@ const SCRAPE = async () => {
       });
     }
   };
-  const read = () => { readNew(); readLegacy(); };
+  const read = (tag) => { readNew(tag); readLegacy(); };
 
   // Auto-expand collapsed sections (2026 markup): header = [role=button] with short title text,
   // section root = its parent, collapsed ⇔ the root's text is just the header's own (no body).
@@ -252,6 +255,53 @@ const SCRAPE = async () => {
     await sleep(700);      // let the expanded grids render
   }
   showMore(); await sleep(500);
+
+  // Tabbed widgets render ONE pane at a time (team tabs "Arsenal | Match", market tabs
+  // "Goalscorers | Multi Scorers | …") — click through every tab, reading after each, so every
+  // pane lands in the accumulator. A strip = 2–6 short non-odds text cells in one row, inside a
+  // section that shows odds columns. Rows read under a tab get the tab name suffixed to their
+  // group so panes can't overwrite each other.
+  // ponytail: a period tab ("1st Half") on a market we stat would mis-title its rows — none of the
+  // player-prop widgets have period tabs today; revisit if bet365 adds them.
+  // Strips are searched ONLY inside real market-section roots (a [role=button] header whose parent
+  // holds odds columns) — never page chrome, so a nav row ("Casino | Rewards") can't qualify. All
+  // cells must share tag+class (real tabs are uniform) and contain no links (links navigate).
+  const roots = [];
+  for (const h of document.querySelectorAll('[role=button]')) {
+    const t = norm(h.innerText);
+    if (!t || t.length > 48) continue;
+    const root = h.parentElement;
+    if (root && root.querySelector('[class*=Market-pwidth]') && !roots.includes(root)) roots.push(root);
+  }
+  const strips = [];
+  for (const root of roots) {
+    for (const e of root.querySelectorAll('div')) {
+      const n = e.childElementCount;
+      if (n < 2 || n > 6) continue;
+      const kids = [...e.children];
+      if (kids.some((k) => k.tagName !== kids[0].tagName || String(k.className) !== String(kids[0].className))) continue;
+      if (kids.some((k) => k.tagName === 'A' || k.querySelector('a') || k.closest('a'))) continue;
+      const texts = kids.map((k) => norm(k.innerText));
+      if (!texts.every((t) => t && t.length <= 26 && !isOddsTxt(t) && !/ v /i.test(t))) continue;
+      if (e.querySelector('[class*=Market-pwidth]')) continue;                  // a grid, not a strip
+      const r = e.getBoundingClientRect();
+      if (r.width < 120 || r.height > 90 || r.height < 14) continue;
+      strips.push(kids);
+    }
+  }
+  read();                                    // baseline: every widget's default pane
+  let tabClicks = 0;
+  for (const kids of strips) {
+    if (tabClicks >= 80) break;              // runaway guard
+    for (const k of kids) {
+      const label = norm(k.innerText);
+      try { k.scrollIntoView({ block: 'center' }); k.click(); } catch { continue; }
+      tabClicks++;
+      await sleep(380);                      // pane swap render
+      read(label);
+    }
+  }
+
   const se = document.scrollingElement;
   for (let y = 0; y <= se.scrollHeight + 600; y += 600) { se.scrollTop = y; await sleep(150); read(); }
   se.scrollTop = 0;
