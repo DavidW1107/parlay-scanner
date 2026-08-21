@@ -149,38 +149,58 @@ const SCRAPE = async () => {
   // suspended, index keeps alignment). The legacy bbl- reader is kept below feeding the same
   // accumulator, so whichever markup the page has wins.
   const readNew = () => {
-    const byGroup = new Map();
-    for (const c of document.querySelectorAll('[class*=Market-pwidth]')) {
-      const g = c.parentElement;
-      if (!byGroup.has(g)) byGroup.set(g, []);
-      byGroup.get(g).push(c);
+    const cols = [...document.querySelectorAll('[class*=Market-pwidth]')];
+    if (!cols.length) return;
+    // classify every column: a NAMES column is mostly non-odds text, an ODDS column mostly prices
+    const info = cols.map((c) => {
+      const rows = [...c.children].map((k) => norm(k.innerText));
+      const odds = rows.filter((t) => isOddsTxt(t)).length;
+      const nonOdds = rows.filter((t) => t && !isOddsTxt(t)).length;
+      return { c, rows, isName: nonOdds > odds, hasOdds: odds > 0 };
+    });
+    // odds columns cluster under one parent; the names column can live OUTSIDE that parent (the
+    // player-prop grids scroll their odds columns horizontally with the names column sticky) — so
+    // pair each cluster with the nearest-ancestor names column instead of assuming one parent.
+    const clusters = new Map();
+    for (const i of info) {
+      if (i.isName || !i.hasOdds) continue;
+      const k = i.c.parentElement;
+      if (!clusters.has(k)) clusters.set(k, []);
+      clusters.get(k).push(i);
     }
-    for (const [g, gcols] of byGroup) {
-      if (gcols.length < 2) continue;                       // a group needs names + ≥1 odds column
-      const parsed = gcols.map((c) => [...c.children].map((k) => norm(k.innerText)));
-      let nameIdx = -1, best = -1;
-      parsed.forEach((rows, i) => {
-        const score = rows.slice(1).filter((t) => t && !isOddsTxt(t)).length;
-        if (score > best) { best = score; nameIdx = i; }
-      });
-      if (nameIdx < 0 || best < 1) continue;
-      const names = parsed[nameIdx].slice(1).map((t) => t.replace(/^\d+\s+/, '')); // strip shirt number
-      // group title: first short text block above us — walk previous siblings up the ancestor chain
-      let title = '';
-      for (let a = g; a && !title && a !== document.body; a = a.parentElement)
+    for (const [par, oddsCols] of clusters) {
+      let nameCol = null, anchor = par;
+      for (let a = par; a && a !== document.body && !nameCol; a = a.parentElement) {
+        const cand = info.filter((i) => i.isName && a.contains(i.c));
+        if (cand.length === 1 || (a === par && cand.length)) {
+          nameCol = cand.sort((x, y) => y.rows.length - x.rows.length)[0];
+          anchor = a;
+        } else if (cand.length > 1) break;   // climbed into another section — bail rather than mispair
+      }
+      if (!nameCol) continue;
+      // header row exists unless the first odds cell is already a price (Double Chance style)
+      const hasHeader = !isOddsTxt(oddsCols[0].rows[0] || '');
+      const body = (rows) => (hasHeader ? rows.slice(1) : rows);
+      const names = body(nameCol.rows).map((t) => t.replace(/^\d+\s+/, '')); // strip shirt number
+      if (!names.length) continue;
+      // title: candidate texts above the anchor, preferring one with market words (a team-tab strip
+      // like "Arsenal | Match" sits closer than the real "Shots on Target" header)
+      const MARKETY = /shot|goal|assist|card|foul|tackl|pass|save|offside|result|both teams|double chance|score|corner/i;
+      let title = '', first = '';
+      for (let a = anchor; a && !title && a !== document.body; a = a.parentElement)
         for (let s = a.previousElementSibling; s && !title; s = s.previousElementSibling) {
           const t = norm(s.innerText).split('\n')[0];
-          if (t && t.length < 48 && !isOddsTxt(t)) title = t;
+          if (!t || t.length > 48 || isOddsTxt(t)) continue;
+          if (!first) first = t;
+          if (MARKETY.test(t)) title = t;
         }
-      title = title.replace(/Sub On Play On.*$/i, '').replace(/Bet Boost.*$/i, '').trim();
-      parsed.forEach((rows, i) => {
-        if (i === nameIdx) return;
-        const colHeader = rows[0];
-        const colIndex = i - (i > nameIdx ? 1 : 0);          // odds columns numbered 0.. skipping names col
-        rows.slice(1).forEach((t, ri) => {
+      title = (title || first).replace(/Sub On Play On.*$/i, '').replace(/Bet Boost.*$/i, '').trim();
+      oddsCols.forEach((i, ci) => {
+        const colHeader = hasHeader ? i.rows[0] : '';
+        body(i.rows).forEach((t, ri) => {
           const player = names[ri];
           if (!player || !isOddsTxt(t)) return;              // empty/suspended cell → skip, index holds
-          acc.set(`${title}|${colHeader}|${colIndex}|${player}`, { group: title, colHeader, colIndex, player, odds: t, suspended: false });
+          acc.set(`${title}|${colHeader}|${ci}|${player}`, { group: title, colHeader, colIndex: ci, player, odds: t, suspended: false });
         });
       });
     }
@@ -211,6 +231,27 @@ const SCRAPE = async () => {
     }
   };
   const read = () => { readNew(); readLegacy(); };
+
+  // Auto-expand collapsed sections (2026 markup): header = [role=button] with short title text,
+  // section root = its parent, collapsed ⇔ the root's text is just the header's own (no body).
+  // Guards: never an odds-pattern text, never a fixture row ("X v Y" would navigate), width ≥280px
+  // keeps us off price/selection cells. Repeat — expanding can lazy-render more sections.
+  for (let round = 0; round < 3; round++) {
+    let clicked = 0;
+    for (const h of document.querySelectorAll('[role=button]')) {
+      const t = norm(h.innerText);
+      if (!t || t.length > 48 || isOddsTxt(t) || / v /i.test(t)) continue;
+      const root = h.parentElement;
+      if (!root || norm(root.innerText).length > t.length + 12) continue;  // body already populated
+      if (root.querySelector('[class*=Market-pwidth]')) continue;          // already open
+      if (h.getBoundingClientRect().width < 280) continue;                 // not a full-width section header
+      try { h.click(); clicked++; } catch {}
+      await sleep(80);
+    }
+    if (!clicked) break;
+    await sleep(700);      // let the expanded grids render
+  }
+  showMore(); await sleep(500);
   const se = document.scrollingElement;
   for (let y = 0; y <= se.scrollHeight + 600; y += 600) { se.scrollTop = y; await sleep(150); read(); }
   se.scrollTop = 0;
