@@ -92,7 +92,7 @@ const clampP = (p) => Math.max(0.02, Math.min(0.97, p));
 // Resolve the matchId for an upcoming fixture between two teams from FotMob's schedule, so a typed
 // matchup can use the match's PUBLISHED lineup (predicted/confirmed/standard) instead of the
 // recent-starter guess. Soonest unplayed meeting wins.
-async function findFixtureId(homeId, awayId) {
+export async function findFixtureId(homeId, awayId) {
   const { fixtures } = await getTeam(homeId);
   const ids = new Set([Number(homeId), Number(awayId)]); // f.homeId/f.awayId are numbers — match on numbers
   const found = (fixtures || [])

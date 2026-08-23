@@ -265,6 +265,9 @@ export async function likelyXI(teamId, lookback = 6) {
     if (!team?.starters?.length) continue;  // skip upcoming / lineup-less matches
     scanned++;
     for (const s of team.starters) {
+      // players who have since LEFT still start these old matches (a May XI at the start of the next
+      // season is all transfers-out). The squad list is current, so anyone not in it is gone.
+      if (byId.size && !byId.has(s.id)) continue;
       const e = starts.get(s.id) || { id: s.id, name: s.name, count: 0 };
       e.count++; starts.set(s.id, e);
     }

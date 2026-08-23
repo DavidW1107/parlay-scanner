@@ -309,17 +309,24 @@ async function scanSquads() {
     const r = await fetch(`/api/fixture?home=${encodeURIComponent(home)}&away=${encodeURIComponent(away)}`);
     const d = await r.json();
     if (!r.ok || d.error) throw new Error(d.error || 'failed');
-    renderSquad($('homeSquad'), d.home);
-    renderSquad($('awaySquad'), d.away);
+    renderSquad($('homeSquad'), d.home, d.xiStatus);
+    renderSquad($('awaySquad'), d.away, d.xiStatus);
     setStatus(`${d.home.name} vs ${d.away.name} — click a player to load their hit-rate grid`);
   } catch (e) { setStatus(e.message, true); }
 }
 
 const pill = (p, xi) => `<span class="player${xi ? ' xi' : ''}" data-id="${p.id}" data-name="${esc(p.name)}">${esc(p.name)}</span>`;
 
-function renderSquad(el, team) {
+const XI_LABEL = {
+  confirmed: '✓ Confirmed XI',
+  predicted: '◑ Predicted XI',
+  standard: '◑ FotMob XI',
+  heuristic: '⚠ Estimated XI (no lineup released)',
+};
+
+function renderSquad(el, team, status) {
   const xiIds = new Set(team.xi.map((p) => p.id));
-  let html = `<h2>${esc(team.name)}</h2><div class="pos">Likely XI</div>`;
+  let html = `<h2>${esc(team.name)}</h2><div class="pos">${esc(XI_LABEL[status] || XI_LABEL.heuristic)}</div>`;
   for (const p of team.xi) html += pill(p, true);
   html += `<div class="pos">Bench / squad</div>`;
   for (const p of team.squad.filter((p) => !xiIds.has(p.id))) html += pill(p, false);

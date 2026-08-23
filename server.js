@@ -2,9 +2,9 @@
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { resolveFixture, getTeam, likelyXI, listFixtures, close } from './src/fotmob.js';
+import { resolveFixture, getTeam, likelyXI, getFixtureLineup, listFixtures, close } from './src/fotmob.js';
 import { deepDive, legStat } from './src/scan.js';
-import { legsForFixture, recommend } from './src/scanner.js';
+import { legsForFixture, recommend, findFixtureId } from './src/scanner.js';
 import { spawn } from 'node:child_process';
 
 const WEB = fileURLToPath(new URL('./web/', import.meta.url));
@@ -24,8 +24,23 @@ const server = createServer(async (req, res) => {
       const { home, away } = await resolveFixture(q.get('home') || '', q.get('away') || '');
       if (!home || !away) return json(res, 404, { error: 'team not found — check spelling' });
       const [hp, ap] = await Promise.all([getTeam(home.id), getTeam(away.id)]); // squads (cached for likelyXI)
-      const [hx, ax] = await Promise.all([likelyXI(home.id), likelyXI(away.id)]);
+      // Prefer the fixture's PUBLISHED lineup (predicted/confirmed/standard) — same rule /api/recommend
+      // uses. The recent-starter heuristic is only a fallback for when no lineup exists yet.
+      let hx = null, ax = null, xiStatus = 'heuristic';
+      const mid = await findFixtureId(home.id, away.id).catch(() => null);
+      if (mid) {
+        const lu = await getFixtureLineup(mid, true).catch(() => null);
+        if (lu?.home?.starters?.length && lu?.away?.starters?.length) {
+          const flip = lu.homeId && Number(lu.homeId) !== Number(home.id);
+          const pos = (sq, s) => ({ id: s.id, name: s.name, position: sq.players.find((x) => x.id === s.id)?.position || '' });
+          hx = (flip ? lu.away : lu.home).starters.map((s) => pos(hp, s));
+          ax = (flip ? lu.home : lu.away).starters.map((s) => pos(ap, s));
+          xiStatus = lu.type || 'predicted';
+        }
+      }
+      if (!hx || !ax) [hx, ax] = await Promise.all([likelyXI(home.id), likelyXI(away.id)]);
       return json(res, 200, {
+        xiStatus, // 'confirmed' | 'predicted' | 'standard' | 'heuristic' — the pill header labels it
         home: { id: home.id, name: home.name, xi: hx, squad: hp.players },
         away: { id: away.id, name: away.name, xi: ax, squad: ap.players },
       });
