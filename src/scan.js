@@ -29,9 +29,9 @@ export async function playerRecords(playerId, lastN = 10) {
     .sort((a, b) => new Date(b.matchDate.utcTime) - new Date(a.matchDate.utcTime))
     .slice(0, lastN);
 
-  const records = [];
-  for (const m of matches) {
-    // ponytail: sequential fetch — matchDetails are cached so only the first scan is slow. Parallelize in the fixture-wide orchestrator if needed.
+  // fetched in parallel — fotmob.js caps real page loads globally, so this just stops one slow
+  // match from blocking the other 17. Cached matches resolve instantly.
+  const records = await Promise.all(matches.map(async (m) => {
     const rec = {
       date: m.matchDate.utcTime,
       opponent: m.opponentTeamName,
@@ -48,8 +48,8 @@ export async function playerRecords(playerId, lastN = 10) {
     } catch {
       /* match stats unavailable — cheap markets (goals/assists/cards) still evaluate */
     }
-    records.push(rec);
-  }
+    return rec;
+  }));
   return { name: p.name, records };
 }
 

@@ -46,14 +46,17 @@ async function dataFetch(path) {
   }, path);
 }
 
-// disk cache: ttlMs=0 → never expires (finished matches are immutable).
+// disk cache: ttlMs=0 → never expires (finished matches are immutable). ttlMs may also be a
+// FUNCTION of the cached payload, so one entry can be permanent and another short-lived — that's
+// how an empty match payload gets remembered without being remembered forever (see getMatch).
 // inflight map coalesces concurrent identical fetches (e.g. teammates sharing a match).
 const inflight = new Map();
 function cached(key, ttlMs, fn, keep = () => true, force = false) {
   const f = `${CACHE_DIR}${key.replace(/[^\w.-]/g, '_')}.json`;
   if (!force && existsSync(f)) {               // force: skip the read (still refetches + rewrites)
     const { ts, data } = JSON.parse(readFileSync(f, 'utf8'));
-    if (ttlMs === 0 || Date.now() - ts < ttlMs) return data;
+    const ttl = typeof ttlMs === 'function' ? ttlMs(data) : ttlMs;
+    if (ttl === 0 || Date.now() - ts < ttl) return data;
   }
   if (inflight.has(key)) return inflight.get(key);
   const pr = Promise.resolve(fn()).then(
@@ -66,8 +69,22 @@ function cached(key, ttlMs, fn, keep = () => true, force = false) {
   return pr;
 }
 
+// Page loads are the whole cost of a scan, so cap how many run at once ACROSS the process. With one
+// global limiter the callers above can fan out freely (per-player match fetches, roster pool) without
+// each needing its own concurrency knob, and without opening 30 browser tabs.
+// ponytail: fixed 6; raise if the machine has headroom, lower if FotMob starts throttling.
+const PAGE_LIMIT = 6;
+let _active = 0;
+const _waiting = [];
+async function withSlot(fn) {
+  if (_active >= PAGE_LIMIT) await new Promise((r) => _waiting.push(r));
+  _active++;
+  try { return await fn(); } finally { _active--; _waiting.shift()?.(); }
+}
+
 // Load a FotMob page and return props.pageProps from its embedded __NEXT_DATA__.
-async function pageProps(url) {
+function pageProps(url) { return withSlot(() => _pageProps(url)); }
+async function _pageProps(url) {
   const page = await (await ctx()).newPage();
   try {
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
@@ -108,7 +125,11 @@ export function getPlayer(id) {
 // matchUrl comes from recentMatches[].matchPageUrl (carries the slug we can't derive from id alone).
 export function getMatch(matchUrl) {
   const id = (matchUrl.match(/#(\d+)/) || [])[1] || matchUrl;
-  return cached(`m4-${id}`, 0, async () => {
+  // Real payloads are immutable → cached forever. EMPTY ones (an upcoming match's shell, or an old
+  // match FotMob simply serves no playerStats for) are cached for a week instead of not at all:
+  // without this, every such match re-loads a browser page on EVERY scan — a couple of them per
+  // player was costing ~5s per player, warm cache or not. The week lets a transient blank recover.
+  return cached(`m4-${id}`, (d) => (Object.keys(d.players || {}).length || d.lineup?.home?.starters?.length ? 0 : 7 * 24 * 3600e3), async () => {
     const pp = await pageProps('https://www.fotmob.com' + (matchUrl.startsWith('/') ? matchUrl : '/' + matchUrl));
     const raw = pp.content?.playerStats || {};
     const players = {};
@@ -126,8 +147,7 @@ export function getMatch(matchUrl) {
     const side = (t) => (t ? { id: t.id, formation: t.formation, starters: (t.starters || []).map((s) => ({ id: s.id, name: s.name, positionId: s.positionId })) } : null);
     const lu = pp.content?.lineup;
     return { matchId: id, players, lineup: lu ? { home: side(lu.homeTeam), away: side(lu.awayTeam) } : null };
-    // only cache once the match has real data — never an upcoming match's empty shell
-  }, (d) => Object.keys(d.players).length > 0 || d.lineup?.home?.starters?.length);
+  });
 }
 
 // Flatten FotMob's grouped stats into { canonicalKey: number }. Keyed by the stable

@@ -171,9 +171,23 @@ export async function legsForFixture(spec, lastN = 18) {
   const homeControl = controlOf(homeForm, homeCh, awayForm, awayCh);
   const awayControl = -homeControl;            // zero-sum by construction (edges negate)
 
-  const recs = await pool(roster, 5, async (pl) => {
-    try { return { pl, rec: await playerRecords(pl.id, lastN) }; } catch { return null; }
+  // progress to the console: a scan is minutes long on a cold cache, and a player whose stats fail
+  // is skipped silently below — without this line a half-empty scan looks identical to a good one.
+  const t0 = Date.now();
+  console.log(`scan ${homeName} v ${awayName} — ${roster.length} players, lineup=${lineupStatus}, lastN=${lastN}`);
+  let done = 0, failed = 0;
+  const recs = await pool(roster, 10, async (pl) => {
+    try {
+      const rec = await playerRecords(pl.id, lastN);
+      console.log(`  [${++done}/${roster.length}] ${pl.name} — ${rec.records.length} matches`);
+      return { pl, rec };
+    } catch (e) {
+      failed++; done++;
+      console.log(`  [${done}/${roster.length}] ${pl.name} — FAILED: ${e?.message || e}`);
+      return null;
+    }
   });
+  console.log(`scan done in ${((Date.now() - t0) / 1000).toFixed(1)}s (${failed} player(s) failed)`);
 
   const legs = [];
   for (const r of recs) {
