@@ -129,7 +129,7 @@ export function getMatch(matchUrl) {
   // match FotMob simply serves no playerStats for) are cached for a week instead of not at all:
   // without this, every such match re-loads a browser page on EVERY scan — a couple of them per
   // player was costing ~5s per player, warm cache or not. The week lets a transient blank recover.
-  return cached(`m4-${id}`, (d) => (Object.keys(d.players || {}).length || d.lineup?.home?.starters?.length ? 0 : 7 * 24 * 3600e3), async () => {
+  return cached(`m5-${id}`, (d) => (Object.keys(d.players || {}).length || d.lineup?.home?.starters?.length ? 0 : 7 * 24 * 3600e3), async () => {
     const pp = await pageProps('https://www.fotmob.com' + (matchUrl.startsWith('/') ? matchUrl : '/' + matchUrl));
     const raw = pp.content?.playerStats || {};
     const players = {};
@@ -146,7 +146,7 @@ export function getMatch(matchUrl) {
     }
     const side = (t) => (t ? { id: t.id, formation: t.formation, starters: (t.starters || []).map((s) => ({ id: s.id, name: s.name, positionId: s.positionId })) } : null);
     const lu = pp.content?.lineup;
-    return { matchId: id, players, lineup: lu ? { home: side(lu.homeTeam), away: side(lu.awayTeam) } : null };
+    return { matchId: id, players, teamStats: teamStatsFrom(pp), lineup: lu ? { home: side(lu.homeTeam), away: side(lu.awayTeam) } : null };
   });
 }
 
@@ -166,6 +166,44 @@ function flatten(groups) {
 }
 
 // Canonical stat → list of possible FotMob titles/keys (first hit wins).
+// Pre-season friendlies are scheduled noise: Liverpool losing 2-4 to Leeds in July and Ipswich
+// beating Wycombe say nothing about a Premier League fixture, but they used to dominate `form`
+// (6 of 8 rows in early September) and hand the underdog a fabricated attacking profile.
+// Everything that scores a TEAM market filters through here.
+export const isFriendly = (leagueName) => /friendl/i.test(leagueName || '');
+
+// Team-level match stats FotMob publishes under content.stats → canonical key.
+// Values arrive as [home, away], either numbers (8) or strings ("502 (89%)", "4.77").
+const TEAM_STAT_TITLES = {
+  'corners': 'corners',
+  'throws': 'throws',
+  'total shots': 'shots',
+  'shots on target': 'sot',
+  'yellow cards': 'cards',
+  'fouls committed': 'fouls',
+  'offsides': 'offsides',
+};
+const statNum = (v) => {
+  if (typeof v === 'number') return v;
+  const m = String(v ?? '').match(/-?\d+(\.\d+)?/);
+  return m ? +m[0] : null;
+};
+function teamStatsFrom(pp) {
+  const groups = pp.content?.stats?.Periods?.All?.stats || [];
+  const home = {}, away = {};
+  for (const g of groups) {
+    for (const it of g.stats || []) {
+      const key = TEAM_STAT_TITLES[String(it.title || '').toLowerCase()];
+      // 'Total shots'/'Offsides' appear in more than one group with identical values, first wins.
+      if (!key || home[key] != null || !Array.isArray(it.stats)) continue;
+      const h = statNum(it.stats[0]), a = statNum(it.stats[1]);
+      if (h == null || a == null) continue;
+      home[key] = h; away[key] = a;
+    }
+  }
+  return Object.keys(home).length ? { home, away } : null;
+}
+
 export const STAT = {
   aliases: {
     shots: ['total shots', 'shots'],
@@ -201,7 +239,7 @@ const findKey = (o, key, d = 0) => {
 
 export function getTeam(teamId) {
   teamId = Number(teamId); // ids cross HTTP/JSON as strings — keep the cache key + `=== teamId` numeric
-  return cached(`team7-${teamId}`, 12 * 3600e3, async () => {
+  return cached(`team8-${teamId}`, 12 * 3600e3, async () => {
     const pp = await pageProps(`https://www.fotmob.com/teams/${teamId}/x`);
     const sq = findKey(pp, 'squad');
     const groups = Array.isArray(sq) ? sq : sq?.squad || [];
@@ -214,18 +252,30 @@ export function getTeam(teamId) {
     const fin = all
       .filter((f) => f?.status?.finished && !f.status.cancelled)
       .sort((a, b) => new Date(b.status.utcTime) - new Date(a.status.utcTime)); // newest-first
-    const finished = fin.filter((f) => f.pageUrl).map((f) => ({
-      id: f.id, pageUrl: f.pageUrl, utc: f.status.utcTime,
-      league: f.tournament?.name || f.leagueName || '', // so likelyXI can skip friendlies
-    }));
-    // team form (for team markets): goals/result/btts straight off each fixture's home/away score
+    const finished = fin.filter((f) => f.pageUrl).map((f) => {
+      const home = f.home?.id === teamId;
+      return {
+        id: f.id, pageUrl: f.pageUrl, utc: f.status.utcTime,
+        league: f.tournament?.name || f.leagueName || '', // so likelyXI can skip friendlies
+        isHome: home, oppId: home ? f.away?.id : f.home?.id, // which columns of a team-stat pair are ours
+      };
+    });
+    // team form (for team markets): goals/result/btts straight off each fixture's home/away score.
+    // COMPETITIVE ONLY, friendlies are excluded here, not just in likelyXI: they were the reason a
+    // relegation-threatened side could read as the stronger team in early September.
     const form = fin
       .filter((f) => typeof f.home?.score === 'number' && typeof f.away?.score === 'number')
+      .filter((f) => !isFriendly(f.tournament?.name || f.leagueName || ''))
       .slice(0, 20)
       .map((f) => {
         const home = f.home.id === teamId;
         const gf = home ? f.home.score : f.away.score, ga = home ? f.away.score : f.home.score;
-        return { gf, ga, total: f.home.score + f.away.score, btts: f.home.score > 0 && f.away.score > 0, win: gf > ga, draw: gf === ga, isHome: home };
+        return {
+          gf, ga, total: f.home.score + f.away.score, btts: f.home.score > 0 && f.away.score > 0,
+          win: gf > ga, draw: gf === ga, isHome: home,
+          oppId: home ? f.away.id : f.home.id,            // feeds the opponent-strength weighting
+          league: f.tournament?.name || f.leagueName || '',
+        };
       });
     const dates = all.filter((f) => f?.status?.utcTime).map((f) => f.status.utcTime); // for congestion checks
     // every fixture (incl. upcoming) so we can resolve a typed matchup → its matchId → published lineup
@@ -240,11 +290,12 @@ export function getTeam(teamId) {
 // shots per side from the cached match pages the scan already loads. Returns null if no shot data.
 export async function teamChances(teamId, lookback = 6) {
   teamId = Number(teamId);
-  return cached(`tc1-${teamId}-${lookback}`, 12 * 3600e3, async () => {
+  return cached(`tc2-${teamId}-${lookback}`, 12 * 3600e3, async () => {
     const { finished } = await getTeam(teamId);
     let n = 0, sf = 0, sa = 0, sotF = 0, sotA = 0;
     for (const fx of finished) {
       if (n >= lookback) break;
+      if (isFriendly(fx.league)) continue;  // same reason as form: pre-season shot counts are noise
       let md;
       try { md = await getMatch(fx.pageUrl); } catch { continue; }
       const players = Object.values(md.players || {});
@@ -261,6 +312,30 @@ export async function teamChances(teamId, lookback = 6) {
     }
     return n ? { n, sf: sf / n, sa: sa / n, sotF: sotF / n, sotA: sotA / n } : null;
   });
+}
+
+// Per-match TEAM stat log (corners, throw-ins, shots, SoT, cards, fouls, offsides) for AND against,
+// newest-first, competitive matches only. This is the sample the team markets are scored on.
+// Which columns are "ours" comes from getTeam's `isHome`, so no team-id lookup is needed per match.
+export async function teamMatchStats(teamId, lookback = 20) {
+  teamId = Number(teamId);
+  const { finished } = await getTeam(teamId);
+  const cand = finished.filter((f) => !isFriendly(f.league)).slice(0, lookback);
+  // withSlot already caps real page loads at PAGE_LIMIT, and most of these are cache hits.
+  // Promise.resolve(): cached() returns the payload SYNCHRONOUSLY on a cache hit, so getMatch is
+  // only sometimes thenable, calling .catch() on it directly works cold and throws warm.
+  const mds = await Promise.all(cand.map((f) => Promise.resolve(getMatch(f.pageUrl)).catch(() => null)));
+  const out = [];
+  for (let i = 0; i < cand.length; i++) {
+    const ts = mds[i]?.teamStats;
+    if (!ts) continue;                                   // older matches can lack the stats block
+    out.push({
+      for: cand[i].isHome ? ts.home : ts.away,
+      against: cand[i].isHome ? ts.away : ts.home,
+      isHome: cand[i].isHome, utc: cand[i].utc, league: cand[i].league,
+    });
+  }
+  return out;
 }
 
 // Most-frequent starters over the team's last `lookback` finished matches → likely XI.

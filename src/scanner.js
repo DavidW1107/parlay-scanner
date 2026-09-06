@@ -1,10 +1,10 @@
 // Automated value scanner: scan both likely XIs, score every player×market×line leg with a
 // conservative probability (Wilson lower bound), merge captured bet365 odds for edge/EV, and
 // assemble parlays in risk tiers. This is the "don't make me read the grid" layer.
-import { resolveFixture, likelyXI, getFixtureLineup, getTeam, teamChances } from './fotmob.js';
+import { resolveFixture, likelyXI, getFixtureLineup, getTeam, teamChances, teamMatchStats } from './fotmob.js';
 import { playerRecords, LINES } from './scan.js';
-import { MARKETS } from './markets.js';
-import { marketLine, wilsonLower, combineParlay, impliedProb } from './engine.js';
+import { MARKETS, TEAM_MARKETS } from './markets.js';
+import { marketLine, wilsonLower, combineParlay, impliedProb, stripVigN } from './engine.js';
 
 // --- small ports of the UI helpers so odds/names match identically server-side ---
 function toDecimal(s) {
@@ -53,18 +53,65 @@ async function pool(items, n, fn) {
 // and it degrades to goals-only when shot data is missing. Upgrade to a real xG/possession model if needed.
 const AVG = { goals: 1.3, shots: 12, sot: 4.2 };  // ~per-team-per-game baselines a factor of 1.0 maps to
 const GS = { temper: 0.38, passive: 0.42, siege: 0.32, poss: 0.22, chanceWeight: 0.6 }; // game-script knobs
-const ATTACK = new Set(['goals', 'assists', 'shots', 'sot', 'chances']);
-const DEFENSE = new Set(['tackles', 'fouls', 'fouled', 'saves']);
+const ATTACK = new Set(['goals', 'assists', 'shots', 'sot', 'chances', 'team_shots', 'team_sot', 'team_corners', 'team_offsides']);
+const DEFENSE = new Set(['tackles', 'fouls', 'fouled', 'saves', 'team_fouls', 'team_cards']);
 const avgOf = (form, k) => (form.length ? form.reduce((s, f) => s + f[k], 0) / form.length : null);
 const clampF = (x) => Math.max(0.4, Math.min(1.8, x));
 const blendCG = (chance, goals) => (chance == null ? goals : chance * GS.chanceWeight + goals * (1 - GS.chanceWeight));
 
+// Opponent strength multiplier per team id, from that opponent's own competitive goal difference.
+// Raw form is blind to WHO you played: beating Wycombe and beating Man City look identical, which is
+// exactly how a weak side ends up rated as the stronger team. w > 1 = a hard opponent.
+const clampW = (w) => Math.max(0.6, Math.min(1.5, w));
+async function opponentStrength(forms) {
+  const ids = [...new Set(forms.flat().map((f) => f.oppId).filter(Boolean))];
+  const entries = await Promise.all(ids.map(async (id) => {
+    try {
+      const f = (await getTeam(id)).form || [];
+      if (!f.length) return [id, 1];
+      return [id, clampW(1 + 0.25 * (avgOf(f, 'gf') - avgOf(f, 'ga')))];  // gd +1.0 → ×1.25
+    } catch { return [id, 1]; }   // an opponent we can't resolve is treated as average, never fatal
+  }));
+  return new Map(entries);
+}
+
+// Opponent-weighted goals for/against. Scoring against a strong side counts for more (×w); conceding
+// to a weak side counts for more (÷w). Falls back to the plain average when no weights are known.
+function weightedGoals(form, W) {
+  if (!form.length) return null;
+  let gf = 0, ga = 0;
+  for (const f of form) {
+    const w = W?.get(f.oppId) ?? 1;
+    gf += f.gf * w; ga += f.ga / w;
+  }
+  return { gf: gf / form.length, ga: ga / form.length };
+}
+
 // control ∈ [-1,1]: how much the player's team dominates THIS matchup (>0 dominant). Blends the two
-// sides' goal difference AND shot-on-target difference (goals + chances), per the user's ask.
-function controlOf(meForm, meCh, oppForm, oppCh) {
-  const gd = (f) => (avgOf(f, 'gf') ?? AVG.goals) - (avgOf(f, 'ga') ?? AVG.goals);
+// sides' opponent-adjusted goal difference AND shot-on-target difference (goals + chances).
+function controlOf(meForm, meCh, oppForm, oppCh, W) {
+  const gd = (f) => { const g = weightedGoals(f, W); return g ? g.gf - g.ga : 0; };
   const sd = (c) => (c ? c.sotF - c.sotA : 0);
   return Math.tanh(0.35 * (gd(meForm) - gd(oppForm)) + 0.12 * (sd(meCh) - sd(oppCh)));
+}
+
+// The market is a far better judge of a matchup than a handful of results, so when the capture
+// contains the 1X2 prices we use them instead of form: de-vig, then take (pHome - pAway) as control.
+// Liverpool 1.20 / draw 7.0 / Ipswich 13.0 → +0.72, against the +0.17 form alone produced.
+function controlFromOdds(oddsRows, homeName, awayName) {
+  const sel = (r) => r.selection || r.player || '';
+  const results = (oddsRows || []).filter((r) => r.marketKey === 'result');
+  const priceFor = (team) => {
+    const r = results.find((x) => teamNameMatch(sel(x), team));
+    return r ? toDecimal(r.odds) : null;
+  };
+  const h = priceFor(homeName), a = priceFor(awayName);
+  if (!h || !a) return null;
+  const drawRow = results.find((x) => /^draw$/i.test(sel(x).trim()));
+  const d = drawRow ? toDecimal(drawRow.odds) : null;
+  // draw included whenever captured, a 1X2 de-vigged 2-way overstates both sides (see engine test)
+  const { probs } = stripVigN(d ? [h, d, a] : [h, a]);
+  return Math.max(-1, Math.min(1, probs[0] - probs[probs.length - 1]));
 }
 
 // opp = the OTHER team's leakiness (ga/sa/sotA) + output (gf/sf/sotF); control = the player team's.
@@ -72,7 +119,7 @@ function gameFactor(marketKey, opp, control = 0) {
   if (!opp) return 1;
   const r = (v, avg) => (v == null ? null : v / avg);
   if (ATTACK.has(marketKey) || marketKey === 'team_goals') {
-    const chance = marketKey === 'shots' ? r(opp.sa, AVG.shots) : r(opp.sotA, AVG.sot); // volume vs quality
+    const chance = (marketKey === 'shots' || marketKey === 'team_shots') ? r(opp.sa, AVG.shots) : r(opp.sotA, AVG.sot); // volume vs quality
     let f = blendCG(chance, r(opp.ga, AVG.goals) ?? 1);
     f *= control > 0 ? (1 - GS.temper * control)    // parked against → temper the favourite's whole attack
                      : (1 + GS.passive * control);  // passive underdog attacks even less (control<0 → ×<1)
@@ -164,12 +211,28 @@ export async function legsForFixture(spec, lastN = 18) {
       homeCh = hc; awayCh = ac;
     } catch { /* form/chances unavailable → adjustment degrades to neutral */ }
   }
+  // per-match TEAM stat logs (corners, throw-ins, shots/SoT, cards, fouls, offsides), the sample the
+  // team markets are scored on. Best-effort: an unavailable log just means no team stat legs.
+  let homeTS = [], awayTS = [];
+  if (hId && aId) {
+    try { [homeTS, awayTS] = await Promise.all([teamMatchStats(hId), teamMatchStats(aId)]); }
+    // logged, not swallowed: a silent [] here is indistinguishable from "this team has no team legs"
+    catch (e) { console.log('  team stat log unavailable:', e?.message || e); }
+  }
+  // how strong was each side's recent opposition, without this, beating Wycombe reads like beating
+  // Man City and the weaker team can come out rated higher.
+  const W = await opponentStrength([homeForm, awayForm]).catch(() => null);
   // opponent profile each side faces (goals form + shot/SoT chance profile) + each side's match control
-  const profileOf = (form, ch) => ({ ga: avgOf(form, 'ga'), gf: avgOf(form, 'gf'), sa: ch?.sa, sotA: ch?.sotA, sf: ch?.sf, sotF: ch?.sotF });
+  const profileOf = (form, ch) => {
+    const g = weightedGoals(form, W);
+    return { ga: g?.ga ?? null, gf: g?.gf ?? null, sa: ch?.sa, sotA: ch?.sotA, sf: ch?.sf, sotF: ch?.sotF };
+  };
   const homeOpp = profileOf(awayForm, awayCh); // home XI faces the away team
   const awayOpp = profileOf(homeForm, homeCh);
-  const homeControl = controlOf(homeForm, homeCh, awayForm, awayCh);
+  const homeControl = controlOf(homeForm, homeCh, awayForm, awayCh, W);
   const awayControl = -homeControl;            // zero-sum by construction (edges negate)
+  console.log(`  control ${homeName} ${homeControl.toFixed(2)} / ${awayName} ${awayControl.toFixed(2)} ` +
+    `(competitive form n=${homeForm.length}/${awayForm.length}, team-stat log n=${homeTS.length}/${awayTS.length})`);
 
   // progress to the console: a scan is minutes long on a cold cache, and a player whose stats fail
   // is skipped silently below — without this line a half-empty scan looks identical to a good one.
@@ -216,6 +279,10 @@ export async function legsForFixture(spec, lastN = 18) {
 
   // team-level legs (result, total goals, BTTS, team goals) — game-script-adjusted where it applies
   legs.push(...teamLegs(homeName, homeForm, awayName, awayForm, homeOpp, awayOpp, homeControl, awayControl));
+  // team STAT legs (corners, throw-ins, shots/SoT, cards, fouls, offsides), per side + match totals
+  legs.push(...teamStatLegs(homeName, homeTS, homeOpp, homeControl));
+  legs.push(...teamStatLegs(awayName, awayTS, awayOpp, awayControl));
+  legs.push(...matchStatLegs(homeTS, awayTS));
 
   // rotation context — only when the XI is OUR guess (heuristic). FotMob's predicted/confirmed XI
   // already encodes the tactical call (rest before a midweek game, rotate vs a weak side, etc.).
@@ -238,6 +305,9 @@ export async function legsForFixture(spec, lastN = 18) {
     fixture: `${homeName} v ${awayName}`, home: homeName, away: awayName, homeId: hId, awayId: aId,
     xi: { home: slimXI(homeXI), away: slimXI(awayXI) }, // the XI actually used — feeds the UI's editor
     lineupStatus, rotationNote, legs,
+    // game-script inputs kept so recommend() can RE-SCORE every leg once the capture supplies the
+    // 1X2 price, the market prices a matchup better than a handful of results ever will.
+    script: { homeName, awayName, homeOpp, awayOpp, formControl: homeControl },
   };
   memo.set(key, out);
   return out;
@@ -275,6 +345,45 @@ function teamLegs(homeName, homeForm, awayName, awayForm, homeOpp, awayOpp, home
   return legs;
 }
 
+// Team STAT legs from a per-match team-stat log. `series` is the count for THIS team each match, so
+// a line is scored exactly like a player prop: hit-rate → Wilson lower bound → game-script factor.
+// corrKey is per team+market, so a parlay can't stack "over 3.5" and "over 4.5 corners" of one side.
+function statLegsFrom(label, team, recs, scope, factorFor, isTeamSide) {
+  const legs = [];
+  for (const [mk, m] of Object.entries(TEAM_MARKETS)) {
+    if (m.scope !== scope) continue;
+    const series = recs.map((r) => {
+      const mine = r.for?.[m.stat];
+      if (mine == null) return null;
+      if (scope !== 'match') return mine;
+      const theirs = r.against?.[m.stat];
+      return theirs == null ? null : mine + theirs;
+    }).filter((v) => v != null);
+    if (!series.length) continue;
+    const factor = isTeamSide ? factorFor(mk) : 1;   // match totals are both sides at once → no side-specific script
+    for (const line of m.lines) {
+      const hits = series.filter((v) => v > line).length;
+      const pRaw = wilsonLower(hits, series.length);
+      legs.push({
+        id: `${label}|${mk}|${line}`, player: label, playerId: null, team,
+        marketKey: mk, market: m.label, line, kind: m.kind, isTeam: true, naive: false,
+        corrKey: `${team}|${mk}`,
+        sample: series.length, hits, pRaw, p: clampP(pRaw * factor),
+        l10: hits / series.length, l5: null, season: hits / series.length,
+        odds: null, implied: null, edge: null,
+      });
+    }
+  }
+  return legs;
+}
+const teamStatLegs = (name, recs, opp, control) =>
+  statLegsFrom(name, name, recs || [], 'team', (mk) => gameFactor(mk, opp, control), true);
+
+// Match totals (total corners / total throw-ins) need BOTH sides' logs. Each side's log already
+// carries for+against, so either one gives the match total, use the longer sample.
+const matchStatLegs = (homeTS, awayTS) =>
+  statLegsFrom('Match', 'Match', ((homeTS || []).length >= (awayTS || []).length ? homeTS : awayTS) || [], 'match', () => 1, false);
+
 // Merge captured bet365 prices onto legs (fresh copies — never mutate the memo).
 function withOdds(legs, oddsRows) {
   return legs.map((leg) => {
@@ -286,7 +395,13 @@ function withOdds(legs, oddsRows) {
         if (leg.marketKey === 'ou_goals') return lineEq(r);
         if (leg.marketKey === 'btts') return true;
         if (leg.marketKey === 'result' || leg.marketKey === 'dc') return teamNameMatch(r.player, leg.team);
-        return false;                                          // team_goals — bet365 has no clean match here
+        // team stat markets: match totals key off the line alone, team totals also need the side the
+        // capture named (corner/throw-in grids carry the team in the market title or the row label)
+        if (leg.marketKey.startsWith('match_')) return lineEq(r);
+        if (leg.marketKey.startsWith('team_') && leg.marketKey !== 'team_goals') {
+          return lineEq(r) && teamNameMatch(r.player, leg.team);
+        }
+        return false;                                          // team_goals: bet365 has no clean match here
       }
       return nameMatch(r.player, leg.player) && (leg.kind === 'atleast' ? r.line == null : lineEq(r));
     });
@@ -303,6 +418,19 @@ function withOdds(legs, oddsRows) {
   });
 }
 
+// Re-score every leg against a NEW control value. Legs keep their Wilson probability (`pRaw`), so
+// swapping the game-script input is just re-applying gameFactor, no re-fetch, no re-scan.
+function rescoreLegs(legs, script, homeControl) {
+  return legs.map((l) => {
+    if (l.pRaw == null || !l.team || l.team === 'Match') return l;   // match totals carry no side script
+    const isHome = l.team === script.homeName;
+    if (!isHome && l.team !== script.awayName) return l;
+    const opp = isHome ? script.homeOpp : script.awayOpp;
+    const control = isHome ? homeControl : -homeControl;
+    return { ...l, p: clampP(l.pRaw * gameFactor(l.marketKey, opp, control)) };
+  });
+}
+
 function* kCombos(n, k, start = 0, prefix = []) {
   if (prefix.length === k) { yield prefix; return; }
   for (let i = start; i <= n - (k - prefix.length); i++) yield* kCombos(n, k, i + 1, [...prefix, i]);
@@ -312,27 +440,50 @@ function* kCombos(n, k, start = 0, prefix = []) {
 // noise). The pool is the UNION of the highest-probability legs (for Bankers) and — when odds are
 // present — the highest-edge legs (for Value); these two sets barely overlap, since +edge legs are
 // usually higher-odds / lower-prob. Without both, one tier or the other comes up empty.
-function buildParlays(legs, { poolSize = 20, maxSize = 6, haveOdds = false } = {}) {
+// A 40-leg pool would be C(40,7) = 18.6M combos at the top size, so the sub-pool shrinks as k grows:
+// the small parlays (where a team leg actually gets used) see the whole pool, the monster multis see
+// only the strongest prefix. Total combos stay ~50k, same order as the old 20-leg pool.
+const K_POOL = { 2: 40, 3: 40, 4: 28, 5: 20, 6: 16, 7: 14 };
+
+function buildParlays(legs, { poolSize = 40, maxSize = 6, haveOdds = false } = {}) {
   // naive (Result/DC): form can't price a matchup — excluded UNTIL the market prices it (l.odds set),
   // at which point its p is the market-implied prob. The p≥0.55 cut below then only keeps it for a
   // clear favourite, i.e. exactly the "winner all but known" game the user wants to stack.
   const strong = legs.filter((l) => l.sample >= 6 && (!l.naive || l.odds > 1));
-  const byProb = strong.filter((l) => l.p >= 0.55).sort((a, b) => b.p - a.p).slice(0, 14);
-  const byEdge = haveOdds ? strong.filter((l) => l.odds > 1 && l.edge > 0).sort((a, b) => b.edge - a.edge).slice(0, 14) : [];
-  const seen = new Set();
-  const pool = [];
-  for (const l of [...byProb, ...byEdge]) { if (seen.has(l.id)) continue; seen.add(l.id); pool.push(l); if (pool.length >= poolSize) break; }
+  // Rank INSIDE each leg type. Player legs outnumber team legs by ~60:1 (828 legs scored, ~13 of them
+  // team), so a single global top-N was always all players, that, not the scoring, is why parlays
+  // came back as five player props. Team and player legs now compete only against their own kind.
+  const rank = (src) => {
+    const byProb = src.filter((l) => l.p >= 0.55).sort((a, b) => b.p - a.p).slice(0, 14);
+    const byEdge = haveOdds ? src.filter((l) => l.odds > 1 && l.edge > 0).sort((a, b) => b.edge - a.edge).slice(0, 14) : [];
+    const seen = new Set(), out = [];
+    for (const l of [...byProb, ...byEdge]) if (!seen.has(l.id)) { seen.add(l.id); out.push(l); }
+    return out;
+  };
+  const teamRanked = rank(strong.filter((l) => l.isTeam));
+  const playerRanked = rank(strong.filter((l) => !l.isTeam));
+  // Interleave the two rankings so every PREFIX of the pool is balanced, the per-k sub-pools below
+  // slice a prefix, so this is what keeps team legs in the big multis too. With no team legs
+  // available (early season, thin competitive sample) it degrades to the player ranking alone.
+  const pool = [], seen = new Set();
+  for (let i = 0; i < Math.max(teamRanked.length, playerRanked.length) && pool.length < poolSize; i++) {
+    for (const l of [teamRanked[i], playerRanked[i]]) {
+      if (!l || seen.has(l.id) || pool.length >= poolSize) continue;
+      seen.add(l.id); pool.push(l);
+    }
+  }
 
   const out = [];
   for (let k = 2; k <= Math.min(maxSize, pool.length); k++) {
-    for (const idx of kCombos(pool.length, k)) {
-      const ls = idx.map((i) => pool[i]);
+    const sub = pool.slice(0, Math.min(pool.length, K_POOL[k] ?? 14));
+    for (const idx of kCombos(sub.length, k)) {
+      const ls = idx.map((i) => sub[i]);
       if (new Set(ls.map((l) => l.corrKey || l.player)).size !== ls.length) continue; // ≤1 leg per player / team-market
       if (haveOdds && !ls.every((l) => l.odds > 1)) continue;                 // priced parlays only, so returns/EV are real
       out.push(combineParlay(ls));
     }
   }
-  return { parlays: out, poolSize: pool.length };
+  return { parlays: out, poolSize: pool.length, teamPool: teamRanked.length, playerPool: playerRanked.length };
 }
 
 const slimLeg = (l) => ({
@@ -379,13 +530,18 @@ function clusterParlays(parlays, { maxReps = 10, maxVariants = 6 } = {}) {
 // Top-level: legs (+optional odds) -> ranked legs + tiered parlays, all slimmed for JSON.
 export function recommend(data, oddsRows) {
   const rawHaveOdds = !!(oddsRows && oddsRows.length);
-  const legs = rawHaveOdds ? withOdds(data.legs, oddsRows) : data.legs.map((l) => ({ ...l }));
+  // The market prices a matchup better than a handful of results can. If the capture carries the
+  // 1X2, de-vig it and re-score every leg against that control BEFORE merging prices, otherwise a
+  // clear favourite/underdog game keeps whatever the thin form sample implied.
+  const oddsControl = rawHaveOdds && data.script ? controlFromOdds(oddsRows, data.home, data.away) : null;
+  const base = oddsControl == null ? data.legs : rescoreLegs(data.legs, data.script, oddsControl);
+  const legs = rawHaveOdds ? withOdds(base, oddsRows) : base.map((l) => ({ ...l }));
   const matched = legs.filter((l) => l.odds > 1).length;
   // Captured odds only "count" if they actually matched players in THIS fixture. A capture for a
   // different match merges nothing → fall back to confidence ranking and warn, don't show blanks.
   const haveOdds = rawHaveOdds && matched > 0;
   // pre-odds only the ≤3-leg "likely" tier renders — don't build 100k+ big combos nobody sees
-  const { parlays, poolSize } = buildParlays(legs, { haveOdds, maxSize: haveOdds ? 7 : 3 });
+  const { parlays, poolSize, teamPool, playerPool } = buildParlays(legs, { haveOdds, maxSize: haveOdds ? 7 : 3 });
 
   const byProb = [...parlays].sort((a, b) => b.prob - a.prob);
   // Headline is SINGLES (topLegs). With odds: VALUE = best +EV 2–4 leg combos (the edge); BIG RETURN
@@ -418,6 +574,9 @@ export function recommend(data, oddsRows) {
     topLegs, tiers,
     meta: {
       legsScored: data.legs.length, parlayPool: poolSize, parlaysBuilt: parlays.length,
+      teamPool, playerPool,
+      control: oddsControl ?? data.script?.formControl ?? null,
+      controlSource: oddsControl != null ? 'bet365 1X2 (de-vigged)' : 'competitive form (opponent-adjusted)',
       oddsWarning: rawHaveOdds && !matched
         ? `captured odds are for other players (${[...new Set(oddsRows.map((r) => r.player))].slice(0, 3).join(', ')}…) — capture THIS match's Bet Builder`
         : null,
@@ -469,7 +628,79 @@ if (process.argv[1] === (await import('url')).fileURLToPath(import.meta.url)) {
     const seven = 'ABCDEFG'.split('').map((c, i) => ({ id: c, sample: 10, p: 0.6, odds: 1.9 + i * 0.1, player: c, market: 'Shots' }));
     const sizes = new Set(buildParlays(seven, { haveOdds: true, maxSize: 7 }).parlays.map((p) => p.legs.length));
     assert(sizes.has(5) && sizes.has(6) && sizes.has(7), `maxSize 7 builds 5/6/7-leg combos, got sizes ${[...sizes]}`);
-    console.log('OK — clusterParlays + team Result priced-in + game-script (favourite attack tempered, saves/fouls collapse, underdog spikes).');
+    // --- opponent-adjusted form: beating a strong side must outrank beating a weak one -----------
+    const W = new Map([[1, 1.4], [2, 0.7]]);                                   // team 1 strong, team 2 weak
+    const vsStrong = weightedGoals([{ gf: 2, ga: 1, oppId: 1 }], W);
+    const vsWeak = weightedGoals([{ gf: 2, ga: 1, oppId: 2 }], W);
+    assert(vsStrong.gf > vsWeak.gf, 'the same 2 goals count for more against a strong side');
+    assert(vsStrong.ga < vsWeak.ga, 'the same goal conceded counts for more against a weak side');
+    // the Liverpool-v-Ipswich shape: identical raw form, but one side played much better opposition
+    const cStrongSched = controlOf([{ gf: 2, ga: 1, oppId: 1 }], null, [{ gf: 2, ga: 1, oppId: 2 }], null, W);
+    assert(cStrongSched > 0.1, `tougher schedule at equal raw form must rate higher, got ${cStrongSched.toFixed(3)}`);
+    assert(near(controlOf([{ gf: 2, ga: 1, oppId: 1 }], null, [{ gf: 2, ga: 1, oppId: 1 }], null, W), 0), 'same opponents + same form = dead even');
+
+    // --- market anchor: de-vigged 1X2 must dominate a thin form sample --------------------------
+    const rows1x2 = [
+      { marketKey: 'result', player: 'Liverpool', odds: '1.20', line: null },
+      { marketKey: 'result', player: 'Draw', odds: '7.00', line: null },
+      { marketKey: 'result', player: 'Ipswich', odds: '13.00', line: null },
+    ];
+    const cOdds = controlFromOdds(rows1x2, 'Liverpool', 'Ipswich');
+    assert(cOdds > 0.65, `1.20 v 13.00 is a lopsided game, got control ${cOdds?.toFixed(3)}`);
+    assert(controlFromOdds([rows1x2[0]], 'Liverpool', 'Ipswich') === null, 'one price only -> no odds control');
+    // re-scoring with that control must SUPPRESS the underdog's attack, not boost it
+    const script = { homeName: 'Liverpool', awayName: 'Ipswich', homeOpp: ghana, awayOpp: eng };
+    const dogLeg = { id: 'd', team: 'Ipswich', marketKey: 'team_goals', pRaw: 0.7, p: 0.79, sample: 9 };
+    const before = dogLeg.p, after = rescoreLegs([dogLeg], script, cOdds)[0].p;
+    assert(after < before, `underdog attack must be tempered by the market anchor (${before} -> ${after})`);
+
+    // --- team STAT markets: a real log must produce scored legs ---------------------------------
+    const log = Array.from({ length: 8 }, () => ({ for: { corners: 6, throws: 20, shots: 14, sot: 5, cards: 2, fouls: 11, offsides: 1 },
+                                                   against: { corners: 3, throws: 22, shots: 9, sot: 3, cards: 1, fouls: 12, offsides: 2 } }));
+    const tsl = teamStatLegs('Liverpool', log, ghana, 0.5);
+    assert(tsl.some((l) => l.marketKey === 'team_corners'), 'team corners scored');
+    assert(tsl.some((l) => l.marketKey === 'team_throws'), 'team throw-ins scored');
+    assert(tsl.every((l) => l.isTeam && l.sample === 8), 'team stat legs carry isTeam + the log sample');
+    const c45 = tsl.find((l) => l.marketKey === 'team_corners' && l.line === 4.5);
+    assert(near(c45.season, 1), '6 corners every game clears the 4.5 line every time');
+    const msl = matchStatLegs(log, []);
+    const mc = msl.find((l) => l.marketKey === 'match_corners' && l.line === 8.5);
+    assert(near(mc.season, 1), 'match corners = for + against = 9, clears 8.5');
+    assert(msl.every((l) => l.team === 'Match'), 'match totals are not attributed to a side');
+
+    // --- captured corner/throw-in prices must actually reach the team stat legs -----------------
+    const cornerLeg = tsl.find((l) => l.marketKey === 'team_corners' && l.line === 4.5);
+    const matchLeg = msl.find((l) => l.marketKey === 'match_corners' && l.line === 8.5);
+    const throwLeg = tsl.find((l) => l.marketKey === 'team_throws' && l.line === 18.5);
+    const capture = [
+      { marketKey: 'team_corners', player: 'Liverpool', line: 4.5, odds: '1.80' },
+      { marketKey: 'match_corners', player: 'Over 8.5', line: 8.5, odds: '1.95' },
+      { marketKey: 'team_throws', player: 'Liverpool FC', line: 18.5, odds: '2.10' },
+    ];
+    const merged = withOdds([cornerLeg, matchLeg, throwLeg], capture);
+    assert(near(merged[0].odds, 1.80), `team corners priced, got ${merged[0].odds}`);
+    assert(near(merged[1].odds, 1.95), `match corners priced off the line alone, got ${merged[1].odds}`);
+    assert(near(merged[2].odds, 2.10), `team throw-ins matched through a loose team name, got ${merged[2].odds}`);
+    assert(merged[0].edge != null, 'a priced team stat leg gets an edge');
+    // the wrong side, and the wrong line, must NOT merge
+    const wrong = withOdds([cornerLeg], [{ marketKey: 'team_corners', player: 'Ipswich Town', line: 4.5, odds: '1.80' }]);
+    assert(wrong[0].odds == null, 'another team\'s corner price must not merge');
+    const offLine = withOdds([cornerLeg], [{ marketKey: 'team_corners', player: 'Liverpool', line: 5.5, odds: '1.80' }]);
+    assert(offLine[0].odds == null, 'a different line must not merge');
+
+    // --- pool rebalance: team legs must survive alongside 60x as many player legs ---------------
+    const manyPlayers = Array.from({ length: 60 }, (_, i) => ({ id: 'p' + i, sample: 10, p: 0.9, odds: 1.5, player: 'P' + i, market: 'Shots' }));
+    const someTeam = Array.from({ length: 6 }, (_, i) => ({ id: 't' + i, sample: 10, p: 0.6, isTeam: true, odds: 1.9, player: 'Liverpool', corrKey: 'L|m' + i, market: 'Team corners' }));
+    const rb = buildParlays([...manyPlayers, ...someTeam], { haveOdds: false, maxSize: 3 });
+    assert(rb.teamPool > 0, 'team legs get their own ranking, not crowded out by 60 stronger player legs');
+    assert(rb.parlays.some((p) => p.legs.some((l) => l.isTeam)), 'team legs actually reach built parlays');
+    // and the combination budget must stay sane at the full pool size
+    assert(rb.parlays.length < 200000, `combination budget bounded, got ${rb.parlays.length}`);
+    // thin-sample guard still bites: a 3-game team log can't reach a parlay
+    const thin = someTeam.map((l) => ({ ...l, sample: 3 }));
+    assert(buildParlays([...manyPlayers, ...thin], { haveOdds: false, maxSize: 3 }).teamPool === 0, 'sample<6 team legs stay out');
+
+    console.log('OK, clusterParlays + team Result priced-in + game-script + opponent-adjusted form + de-vig anchor + team stat markets + pool rebalance.');
     process.exit(0);
   }
   const [, , home = 'Man City', away = 'Arsenal'] = process.argv;

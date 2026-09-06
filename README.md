@@ -49,7 +49,8 @@ Manual drill-down still works: **Scan squads**, double-click any player for the 
 grid, double-click an Odds cell to price one leg by hand.
 
 > Hit-rate counts only games where the player played ≥60 min (cameos excluded). Leg probability
-> is the Wilson lower bound of the last-N hit rate. Parlay probability multiplies legs
+> is the Wilson lower bound of the last-N hit rate. Team legs are scored the same way off the team's
+> competitive matches (friendlies excluded). Parlay probability multiplies legs
 > (independence assumed — same-match legs correlate, so treat combined odds as optimistic).
 
 Change the port with `PORT=5858 npm start`.
@@ -64,7 +65,7 @@ src/scanner.js  the brain — scans both XIs, Wilson-scores every leg, merges od
 src/fotmob.js   data layer — Playwright reads FotMob's embedded __NEXT_DATA__; disk-cached
 src/scan.js     merges recentMatches + per-match stats into newest-first records
 src/engine.js   pure math — hit-rate, implied prob, edge, Wilson lower bound, parlay combine
-src/markets.js  bet365 market catalog → canonical FotMob stat key
+src/markets.js  bet365 market catalog (player + team) → canonical FotMob stat key
 capture-bet365.mjs  attended, read-only bet365 odds capture (you drive a signed-in browser)
 ```
 
@@ -80,8 +81,38 @@ npm run check:fotmob   # live: hits FotMob, prints Haaland's resolved stats
 
 ## Markets
 
-Shots · Shots on target · Fouls committed · Fouls won · Tackles · Passes · Chances created ·
-Goalkeeper saves · Offsides · Anytime goalscorer · Anytime assist · To be booked.
+**Player:** Shots · Shots on target · Fouls committed · Fouls won · Tackles · Passes ·
+Chances created · Goalkeeper saves · Offsides · Anytime goalscorer · Anytime assist · To be booked.
+
+**Team:** Match result · Double chance · Team goals · Total goals · BTTS · Team corners ·
+Total corners · Team throw-ins · Total throw-ins · Team shots · Team shots on target ·
+Team cards · Team fouls · Team offsides.
+
+Team stat markets are counted off FotMob's per-match team stats block (`teamMatchStats`), so their
+sample is the team's **competitive** match count, not the player-level 18. Early in a season that
+means most team legs sit below the `sample >= 6` floor and are held back deliberately, filling in as
+league games are played.
+
+### Competitive matches only
+
+Pre-season friendlies are excluded from every team-level calculation, `form`, `teamChances` and the
+team stat log. They used to dominate: in early September a team's `form` was 6 friendlies to 2 league
+games, so a promoted side beating Wycombe and Oxford in July read as a stronger attack than a
+Premier League side that lost a friendly 2-4, and the scanner rated the fixture close to a coin flip.
+
+### How a matchup's strength is judged
+
+`control` (−1..+1) drives the whole game-script adjustment: how much one side dominates, which
+tempers a favourite's attack and spikes the underdog's keeper and defence. Two sources, best first:
+
+1. **De-vigged bet365 1X2**, once a capture contains it. The market prices a matchup far better than
+   a handful of results can. The capture takes the Draw price purely for this, stripping vig from
+   home/away alone pushes the draw's share onto both and overstates the favourite. Every leg is
+   re-scored against this control before prices are merged.
+2. **Opponent-adjusted competitive form**, otherwise. Each result is weighted by that opponent's own
+   goal difference, so scoring against a strong side counts for more and conceding to a weak one
+   counts against you. Raw form is blind to who you played, which is how the weaker team could come
+   out rated higher.
 
 ## bet365 odds — how the capture works
 
@@ -98,5 +129,30 @@ re-aligns the odds to player rows, and writes `_b365_capture.json`. The app fuzz
 merges them in.
 
 > The over/under grid is obfuscated (rotating class names, odds in positional columns), so that
-> part of the extractor can need a tweak after a bet365 reskin — every capture writes a `_debug`
+> part of the extractor can need a tweak after a bet365 reskin, and every capture writes a `_debug`
 > block for exactly that. Anytime markets (To Score / Assist / Booked) are the robust ones.
+
+### Corners and throw-ins
+
+These are not in the Player Markets pane. bet365 keeps them behind the fixture's own market-group
+nav (`Main | Goals | Corners | Bookings | ...`), which swaps the market list in place, so the capture
+now clicks through to them after sweeping the pane you opened. Each group gets the same treatment:
+expand every section, walk every tab, scroll to force lazy rows. Only non-anchor labels are clicked
+and the URL is checked after each one, so a click can never take you off the fixture; if it somehow
+does, the script steps back and skips that group.
+
+Only the **over** side of a plain total is kept, since every team stat line the scanner scores is an
+over. `10+` maps to over-9.5; a bare whole-number line is a push market (exactly 10 refunds) and is
+skipped rather than priced wrong. Handicaps, Asian lines, halves, `Most Corners` and `First Corner`
+are all ignored.
+
+> The mapping is written against bet365's market **names**, not a verified live DOM, so it wants one
+> attended run to confirm. If `team_corners` / `match_throws` come back empty, read
+> `_debug.cornerThrowMisses` in `_b365_capture.json`: it lists the exact group / column / row text of
+> every corner or throw-in cell that was seen but matched no rule, which is all the mapper needs.
+
+Check the mapping rules without a browser:
+
+```bash
+node capture-bet365.mjs --selftest
+```

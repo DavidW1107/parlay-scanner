@@ -31,6 +31,37 @@ const BROWSERS = [   // first real browser binary that exists wins — Win / Lin
   '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
 ];
 
+const isOdds = (t) => /^(\d+\/\d+|\d+\.\d+|EVS|evens)$/i.test(t);
+
+// --- market-mapper self-check: `node capture-bet365.mjs --selftest` (no browser, no network) ---
+// toLeg is a hoisted function declaration, so it is callable here, before anything connects.
+if (process.argv.includes('--selftest')) {
+  const assert = (c, m) => { if (!c) throw new Error('FAIL: ' + m); };
+  const L = (group, colHeader, player) => toLeg({ group, colHeader, player, odds: '1.90', colIndex: 0 });
+  // match totals: line in the row label, or in the column header with Over/Under rows
+  assert(L('Total Corners', '', 'Over 9.5')?.marketKey === 'match_corners', 'total corners -> match_corners');
+  assert(L('Total Corners', '', 'Over 9.5')?.line === 9.5, 'line read from the row label');
+  assert(L('Match Corners', '10.5', 'Over')?.line === 10.5, 'line read from the column header');
+  assert(L('Total Throw Ins', '', 'Over 40.5')?.marketKey === 'match_throws', 'throw-in total -> match_throws');
+  // team totals: the side named in the title, or as the row label
+  const tc = L('Liverpool Total Corners', '', 'Over 4.5');
+  assert(tc?.marketKey === 'team_corners' && tc.line === 4.5, 'team corners keyed + lined');
+  assert(tc.selection === 'Liverpool', `team carried for name matching, got ${tc?.selection}`);
+  assert(L('Team Throw Ins', '18.5', 'Ipswich Town Over')?.selection === 'Ipswich Town', 'team read from the row label');
+  // only the over side, and only push-free lines
+  assert(L('Total Corners', '', 'Under 9.5') === null, 'under side not scored');
+  assert(L('Total Corners', '10', 'Over') === null, 'bare whole-number line is a push market, skipped');
+  assert(L('Total Corners', '10+', 'Over')?.line === 9.5, '"10+" is push-free, maps to over 9.5');
+  // derivative corner markets must not be mistaken for a total
+  for (const g of ['Most Corners', 'First Corner', 'Corner Handicap', 'Asian Corners', '1st Half Corners'])
+    assert(L(g, '', 'Over 4.5') === null, `${g} is not a plain total`);
+  // player markets still map as before
+  assert(L('Shots on Target', '2+', 'Mohamed Salah')?.marketKey === 'sot', 'player SoT unaffected');
+  assert(L('Match Result', 'Draw', 'Match')?.selection === 'Draw', 'draw column kept for the de-vig');
+  console.log('OK, capture market mapping (corners + throw-ins, team + match, over-only, push-free).');
+  process.exit(0);
+}
+
 rmSync(OUT, { force: true }); // clear stale capture so the app never reads an old run
 
 const die = (reason) => { writeFileSync(OUT, JSON.stringify({ ok: false, reason, rows: [] })); process.exit(0); };
@@ -185,7 +216,7 @@ const SCRAPE = async () => {
       if (!names.length) continue;
       // title: candidate texts above the anchor, preferring one with market words (a team-tab strip
       // like "Arsenal | Match" sits closer than the real "Shots on Target" header)
-      const MARKETY = /shot|goal|assist|card|foul|tackl|pass|save|offside|result|both teams|double chance|score|corner/i;
+      const MARKETY = /shot|goal|assist|card|foul|tackl|pass|save|offside|result|both teams|double chance|score|corner|throw/i;
       let title = '', first = '';
       for (let a = anchor; a && !title && a !== document.body; a = a.parentElement)
         for (let s = a.previousElementSibling; s && !title; s = s.previousElementSibling) {
@@ -235,76 +266,127 @@ const SCRAPE = async () => {
   };
   const read = (tag) => { readNew(tag); readLegacy(); };
 
+  const se = document.scrollingElement;
+
   // Auto-expand collapsed sections (2026 markup): header = [role=button] with short title text,
-  // section root = its parent, collapsed ⇔ the root's text is just the header's own (no body).
-  // Guards: never an odds-pattern text, never a fixture row ("X v Y" would navigate), width ≥280px
-  // keeps us off price/selection cells. Repeat — expanding can lazy-render more sections.
-  for (let round = 0; round < 3; round++) {
-    let clicked = 0;
-    for (const h of document.querySelectorAll('[role=button]')) {
-      const t = norm(h.innerText);
-      if (!t || t.length > 48 || isOddsTxt(t) || / v /i.test(t)) continue;
-      const root = h.parentElement;
-      if (!root || norm(root.innerText).length > t.length + 12) continue;  // body already populated
-      if (root.querySelector('[class*=Market-pwidth]')) continue;          // already open
-      if (h.getBoundingClientRect().width < 280) continue;                 // not a full-width section header
-      try { h.click(); clicked++; } catch {}
-      await sleep(80);
+  // section root = its parent, collapsed <=> the root's text is just the header's own (no body).
+  // Guards: never an odds-pattern text, never a fixture row ("X v Y" would navigate), width >=280px
+  // keeps us off price/selection cells. Repeat: expanding can lazy-render more sections.
+  const expandAll = async () => {
+    for (let round = 0; round < 3; round++) {
+      let clicked = 0;
+      for (const h of document.querySelectorAll('[role=button]')) {
+        const t = norm(h.innerText);
+        if (!t || t.length > 48 || isOddsTxt(t) || / v /i.test(t)) continue;
+        const root = h.parentElement;
+        if (!root || norm(root.innerText).length > t.length + 12) continue;  // body already populated
+        if (root.querySelector('[class*=Market-pwidth]')) continue;          // already open
+        if (h.getBoundingClientRect().width < 280) continue;                 // not a full-width section header
+        try { h.click(); clicked++; } catch {}
+        await sleep(80);
+      }
+      if (!clicked) break;
+      await sleep(700);      // let the expanded grids render
     }
-    if (!clicked) break;
-    await sleep(700);      // let the expanded grids render
-  }
-  showMore(); await sleep(500);
+    showMore(); await sleep(500);
+  };
 
   // Tabbed widgets render ONE pane at a time (team tabs "Arsenal | Match", market tabs
-  // "Goalscorers | Multi Scorers | …") — click through every tab, reading after each, so every
-  // pane lands in the accumulator. A strip = 2–6 short non-odds text cells in one row, inside a
-  // section that shows odds columns. Rows read under a tab get the tab name suffixed to their
+  // "Goalscorers | Multi Scorers | ...") so we click through every tab, reading after each, and
+  // every pane lands in the accumulator. A strip = 2-6 short non-odds text cells in one row, inside
+  // a section that shows odds columns. Rows read under a tab get the tab name suffixed to their
   // group so panes can't overwrite each other.
-  // ponytail: a period tab ("1st Half") on a market we stat would mis-title its rows — none of the
+  // ponytail: a period tab ("1st Half") on a market we stat would mis-title its rows. None of the
   // player-prop widgets have period tabs today; revisit if bet365 adds them.
   // Strips are searched ONLY inside real market-section roots (a [role=button] header whose parent
-  // holds odds columns) — never page chrome, so a nav row ("Casino | Rewards") can't qualify. All
+  // holds odds columns), never page chrome, so a nav row ("Casino | Rewards") can't qualify. All
   // cells must share tag+class (real tabs are uniform) and contain no links (links navigate).
-  const roots = [];
-  for (const h of document.querySelectorAll('[role=button]')) {
-    const t = norm(h.innerText);
-    if (!t || t.length > 48) continue;
-    const root = h.parentElement;
-    if (root && root.querySelector('[class*=Market-pwidth]') && !roots.includes(root)) roots.push(root);
-  }
-  const strips = [];
-  for (const root of roots) {
-    for (const e of root.querySelectorAll('div')) {
-      const n = e.childElementCount;
-      if (n < 2 || n > 6) continue;
-      const kids = [...e.children];
-      if (kids.some((k) => k.tagName !== kids[0].tagName || String(k.className) !== String(kids[0].className))) continue;
-      if (kids.some((k) => k.tagName === 'A' || k.querySelector('a') || k.closest('a'))) continue;
-      const texts = kids.map((k) => norm(k.innerText));
-      if (!texts.every((t) => t && t.length <= 26 && !isOddsTxt(t) && !/ v /i.test(t))) continue;
-      if (e.querySelector('[class*=Market-pwidth]')) continue;                  // a grid, not a strip
-      const r = e.getBoundingClientRect();
-      if (r.width < 120 || r.height > 90 || r.height < 14) continue;
-      strips.push(kids);
+  const findStrips = () => {
+    const roots = [];
+    for (const h of document.querySelectorAll('[role=button]')) {
+      const t = norm(h.innerText);
+      if (!t || t.length > 48) continue;
+      const root = h.parentElement;
+      if (root && root.querySelector('[class*=Market-pwidth]') && !roots.includes(root)) roots.push(root);
     }
-  }
-  read();                                    // baseline: every widget's default pane
-  let tabClicks = 0;
-  for (const kids of strips) {
-    if (tabClicks >= 80) break;              // runaway guard
-    for (const k of kids) {
-      const label = norm(k.innerText);
-      try { k.scrollIntoView({ block: 'center' }); k.click(); } catch { continue; }
-      tabClicks++;
-      await sleep(380);                      // pane swap render
-      read(label);
+    const strips = [];
+    for (const root of roots) {
+      for (const e of root.querySelectorAll('div')) {
+        const n = e.childElementCount;
+        if (n < 2 || n > 6) continue;
+        const kids = [...e.children];
+        if (kids.some((k) => k.tagName !== kids[0].tagName || String(k.className) !== String(kids[0].className))) continue;
+        if (kids.some((k) => k.tagName === 'A' || k.querySelector('a') || k.closest('a'))) continue;
+        const texts = kids.map((k) => norm(k.innerText));
+        if (!texts.every((t) => t && t.length <= 26 && !isOddsTxt(t) && !/ v /i.test(t))) continue;
+        if (e.querySelector('[class*=Market-pwidth]')) continue;                  // a grid, not a strip
+        const r = e.getBoundingClientRect();
+        if (r.width < 120 || r.height > 90 || r.height < 14) continue;
+        strips.push(kids);
+      }
     }
+    return strips;
+  };
+
+  // Everything we do to ONE market pane: expand it, read the default view, walk its tabs, then
+  // scroll it (bet365 lazy-renders rows). Reused verbatim for each market group we visit.
+  const sweepPane = async (tag = '') => {
+    await expandAll();
+    const strips = findStrips();
+    read(tag);                                 // baseline: every widget's default pane
+    let tabClicks = 0;
+    for (const kids of strips) {
+      if (tabClicks >= 40) break;              // runaway guard
+      for (const k of kids) {
+        const label = norm(k.innerText);
+        try { k.scrollIntoView({ block: 'center' }); k.click(); } catch { continue; }
+        tabClicks++;
+        await sleep(380);                      // pane swap render
+        read(tag ? `${tag} ${label}` : label);
+      }
+    }
+    for (let y = 0; y <= se.scrollHeight + 600; y += 600) { se.scrollTop = y; await sleep(150); read(tag); }
+    se.scrollTop = 0;
+  };
+
+  await sweepPane();                           // the pane the user opened (Player Markets)
+
+  // Corners and throw-ins are NOT in the Player Markets pane. bet365 keeps them behind the
+  // fixture's own market-group nav ("Main | Goals | Corners | Bookings | ..."), which swaps the
+  // market list in place. Clicking one is the same class of UI click as a section expander: never a
+  // price, a participant or the betslip. Anchors and anything inside one are excluded so a click
+  // can't navigate off the fixture, and if the URL moves anyway we undo it and skip that item.
+  const GROUPNAV = /^(corners?|throw[\s-]?ins?|corners?\s*&\s*cards|cards\s*&\s*corners?)$/i;
+  // A nav item is a leaf label of the right size that is NOT a link (and not inside one), so a
+  // click can never navigate off the fixture. Same predicate is used to find the labels and to
+  // re-find each one at click time.
+  const navCands = (test) => {
+    const out = [];
+    for (const el of document.querySelectorAll('div,span,button,li')) {
+      if (el.children.length > 1) continue;                      // leaf-ish label only
+      const t = norm(el.innerText);
+      if (!t || !test(t)) continue;
+      if (el.tagName === 'A' || el.closest('a')) continue;       // never navigate off the fixture
+      const r = el.getBoundingClientRect();
+      if (r.width < 40 || r.width > 400 || r.height < 14 || r.height > 80) continue;
+      if (out.some((o) => o.el.contains(el) || el.contains(o.el))) continue;   // one node per label
+      out.push({ el, t });
+    }
+    return out;
+  };
+  const navLabels = [...new Set(navCands((t) => GROUPNAV.test(t)).map((n) => n.t))].slice(0, 4);
+  const startUrl = location.href;
+  for (const label of navLabels) {
+    // re-query every time: swapping a pane re-renders the nav, and a node captured before the first
+    // click is detached by the second, where .click() silently does nothing
+    const el = navCands((t) => t === label)[0]?.el;
+    if (!el) continue;
+    try { el.scrollIntoView({ block: 'center' }); el.click(); } catch { continue; }
+    await sleep(1000);                                           // market list swap + first render
+    if (location.href !== startUrl) { history.back(); await sleep(1500); continue; }
+    await sweepPane(label);
   }
 
-  const se = document.scrollingElement;
-  for (let y = 0; y <= se.scrollHeight + 600; y += 600) { se.scrollTop = y; await sleep(150); read(); }
-  se.scrollTop = 0;
   return [...acc.values()];
 };
 
@@ -315,8 +397,6 @@ for (const fr of target.frames()) {
   if (cells.length > raw.length) raw = cells;   // the frame holding the Bet Builder wins
 }
 
-const isOdds = (t) => /^(\d+\/\d+|\d+\.\d+|EVS|evens)$/i.test(t);
-
 // Map one raw cell → { marketKey, line } in our catalog, or null to skip. bet365 prices player
 // over/unders as "N+" (≥N) which equals our over-(N−0.5) line; anytime markets name their column.
 function toLeg(r) {
@@ -324,8 +404,41 @@ function toLeg(r) {
   const g = r.group.toLowerCase(), h = r.colHeader.toLowerCase();
   const row = (r.player || '').toLowerCase();
   // --- TEAM markets: `selection` carries the bet (team name / 'Both teams score' / 'Over X') ---
-  if (/\bresult\b/.test(g) && !/both teams|range|winning|half/.test(g)) {       // full-match 1X2; skip Draw column
-    return row === 'match' && h !== 'draw' ? { marketKey: 'result', line: null, selection: r.colHeader } : null;
+  // full-match 1X2. The DRAW is captured too: it never becomes a leg (no team matches "Draw"), but
+  // the scanner needs all three prices to de-vig the market into a real matchup strength, stripping
+  // vig from home/away alone pushes the draw's share onto both and overstates the favourite.
+  if (/\bresult\b/.test(g) && !/both teams|range|winning|half/.test(g)) {
+    return row === 'match' ? { marketKey: 'result', line: null, selection: r.colHeader } : null;
+  }
+  // --- Corners / throw-ins, team totals and match totals --------------------------------------
+  // Layout varies: the line can sit in the row label ("Over 9.5") or in the column header ("9.5"
+  // with rows Over/Under), so take the number from wherever it appears. Only the OVER side is kept,
+  // because every team stat line the scanner scores is an over.
+  // ponytail: written against bet365's market NAMES, not verified against a live fixture's DOM
+  // (that needs an attended signed-in run). Every capture writes _debug with the raw group/column
+  // text, so a miss is diagnosable from one run instead of another DOM read.
+  if (/corner|throw/.test(g)) {
+    // plain totals only: handicaps, race-to, halves, "most corners" and exact counts aren't our lines
+    if (/most|first|last|next|race|handicap|asian|exact|odd\/even|1st|2nd|half|minute|10 min/.test(g)) return null;
+    const stat = /corner/.test(g) ? 'corners' : 'throws';
+    const blob = `${row} ${h}`;
+    if (!/over/.test(blob)) return null;                        // unders and exact counts aren't scored
+    const m = blob.match(/(\d+(?:\.\d+)?)\s*(\+)?/);
+    if (!m) return null;
+    const n = Number(m[1]);
+    // "10+" means >=10, i.e. our over-9.5. A BARE whole number is a push market (exactly 10 refunds),
+    // which the engine's > line predicate would price wrong, so it is skipped rather than guessed at.
+    const line = n % 1 !== 0 ? n : (m[2] ? n - 0.5 : null);
+    if (line == null) return null;
+    // a team-scoped market names the side, either in the title ("Liverpool Total Corners") or as the
+    // row label; strip the market words and whatever is left is the team for the scanner to match
+    const residue = r.group.replace(/\bteam\b|total|match|game|corners?|throw[\s-]?ins?|over|under|\d+(\.\d+)?/gi, '')
+      .replace(/[^\w' -]/g, ' ').replace(/\s+/g, ' ').trim();
+    const rowName = /^(over|under)\b/.test(row) ? '' : r.player.replace(/\s*(over|under)\s*\d*(\.\d+)?/i, '').trim();
+    const team = residue || rowName;
+    return team
+      ? { marketKey: stat === 'corners' ? 'team_corners' : 'team_throws', line, selection: team }
+      : { marketKey: stat === 'corners' ? 'match_corners' : 'match_throws', line, selection: `Over ${line}` };
   }
   if (/both teams to score/.test(g) && !/card|receive/.test(g)) {
     return row === 'match' && h === 'yes' ? { marketKey: 'btts', line: null, selection: 'Both teams score' } : null;
@@ -377,6 +490,13 @@ for (const fr of target.frames()) {   // fixture header lives in whichever frame
   if (fixture) break;
 }
 const groupsSeen = [...new Set(raw.map((r) => r.group))];
-writeFileSync(OUT, JSON.stringify({ ok: true, url: target.url(), fixture, rows, _debug: { groupsSeen, byMarket, rawCells: raw.length, scrapedFrames } }, null, 1));
+// Corner/throw-in cells that were SEEN but mapped to nothing. The mapper is written against
+// bet365's market names rather than a verified DOM, so this is the one field to read if those
+// markets come back empty: it shows the exact group/column/row text the rules have to handle.
+const cornerThrowMisses = raw
+  .filter((r) => /corner|throw/i.test(r.group) && !toLeg(r))
+  .slice(0, 25)
+  .map((r) => `${r.group} | ${r.colHeader} | ${r.player} | ${r.odds}`);
+writeFileSync(OUT, JSON.stringify({ ok: true, url: target.url(), fixture, rows, _debug: { groupsSeen, byMarket, rawCells: raw.length, scrapedFrames, cornerThrowMisses } }, null, 1));
 console.log(`CAPTURED ${rows.length} prices for ${fixture} → ${JSON.stringify(byMarket)}`);
 await browser.close();   // disconnects CDP; your browser stays open

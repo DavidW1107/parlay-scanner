@@ -11,6 +11,15 @@ export function stripVig(overOdds, underOdds) {
   return { over: io / sum, under: iu / sum, overround: sum - 1 };
 }
 
+// N-way vig strip (1X2 = [home, draw, away]). Returns fair probabilities summing to 1. Two-way
+// input works too, but a 1X2 market de-vigged WITHOUT its draw price pushes the draw's share onto
+// home/away and overstates both, pass all three whenever the draw was captured.
+export function stripVigN(oddsList) {
+  const inv = oddsList.map((o) => 1 / o);
+  const sum = inv.reduce((a, b) => a + b, 0);
+  return { probs: inv.map((i) => i / sum), overround: sum - 1 };
+}
+
 // games newest-first. eligible() gates cameo appearances out of the denominator.
 export function hitRate(games, predicate, eligible = () => true) {
   const elig = games.filter(eligible);
@@ -102,6 +111,13 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const v = stripVig(1.9, 1.9);
   assert(near(v.over, 0.5) && near(v.under, 0.5), 'symmetric vig strip = 0.5/0.5');
   assert(v.overround > 0.05 && v.overround < 0.06, 'overround ~5.3%');
+
+  // 3-way strip: a lopsided 1X2 must resolve to a lopsided fair book
+  const t3 = stripVigN([1.2, 7.0, 13.0]);
+  assert(near(t3.probs.reduce((a, b) => a + b, 0), 1), '3-way probs sum to 1');
+  assert(t3.probs[0] > 0.75 && t3.probs[2] < 0.09, `1.20 favourite ~79%, 13.0 dog ~7%, got ${t3.probs.map((p) => p.toFixed(3))}`);
+  // dropping the draw inflates both sides, the reason controlFromOdds insists on it when present
+  assert(stripVigN([1.2, 13.0]).probs[0] > t3.probs[0], '2-way strip of a 1X2 overstates the favourite');
 
   // synthetic shots log, newest-first, all 90 mins
   const shots = [3, 1, 2, 4, 0, 2, 5, 1, 2, 3];
